@@ -1,0 +1,3 @@
+﻿  overlay.cpp
+C:\Users\tetfy\OneDrive\Documents\444\src\overlay.cpp(829,37): warning C4244: аргумент: преобразование "LONG_PTR" в "DWORD", возможна потеря данных
+  FeatureModuleOverlay_NoTxtLogs.vcxproj -> C:\Users\tetfy\OneDrive\Documents\444\bin\Debug\FeatureModuleOverlay_NoTxtLogs.exe
