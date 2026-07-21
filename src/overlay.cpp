@@ -26,12 +26,14 @@
 #include "backends/imgui_impl_dx11.h"
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
-#define PIPE_NAME_W L"\\\\.\\pipe\\fuckoffmaxey"
-#define FLAG_COLOR_OK (1u << 0)
-#define FLAG_DEPTH_OK (1u << 1)
-#define FLAG_FPS_OK (1u << 2)
+#define PIPE_NAME_W     L"\\\\.\\pipe\\fuckoffmaxey"
+#define FLAG_COLOR_OK   (1u << 0)
+#define FLAG_DEPTH_OK   (1u << 1)
+#define FLAG_FPS_OK     (1u << 2)
 #define FLAG_VIEWPORT_OK (1u << 4)
-#define PAYLOAD_SIZE 0x40u
+#define PAYLOAD_SIZE    0x40u
+
+#define FORBIDDEN_VK_NONE  0  // ничего не запрещаем
 
 #pragma pack(push, 1)
 struct PipePayloadRaw40
@@ -98,15 +100,16 @@ static DXGI_FORMAT DepthSRVFormat(uint32_t fmt)
         return DXGI_FORMAT_R32_FLOAT;
     }
 }
+
 static DXGI_FORMAT ColorSRVFormat(DXGI_FORMAT f)
 {
     switch (f)
     {
-    case DXGI_FORMAT_R8G8B8A8_TYPELESS: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:   return DXGI_FORMAT_R8G8B8A8_UNORM;
     case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM;
-    case DXGI_FORMAT_B8G8R8A8_TYPELESS: return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:   return DXGI_FORMAT_B8G8R8A8_UNORM;
     case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM;
-    case DXGI_FORMAT_B8G8R8X8_TYPELESS: return DXGI_FORMAT_B8G8R8X8_UNORM;
+    case DXGI_FORMAT_B8G8R8X8_TYPELESS:   return DXGI_FORMAT_B8G8R8X8_UNORM;
     case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8X8_UNORM;
     default: return f;
     }
@@ -133,29 +136,28 @@ static PipePayload NormalizePayload(const uint8_t raw[PAYLOAD_SIZE])
 
     if ((p.flags & FLAG_VIEWPORT_OK) && p.vpWidth && p.vpHeight)
     {
-        if (!p.colorWidth) p.colorWidth = p.vpWidth;
+        if (!p.colorWidth)  p.colorWidth = p.vpWidth;
         if (!p.colorHeight) p.colorHeight = p.vpHeight;
-        if (!p.depthWidth) p.depthWidth = p.vpWidth;
+        if (!p.depthWidth)  p.depthWidth = p.vpWidth;
         if (!p.depthHeight) p.depthHeight = p.vpHeight;
     }
     return p;
 }
-
-static HWND g_hwnd = nullptr;
-static HWND g_target = nullptr;
-static DWORD g_targetPid = 0;
-static bool g_console = false;
-static bool g_desktop = false;
-static bool g_running = true;
-static bool g_menu = false;
-static bool g_reshadeInput = false;
-static bool g_invertDepth = false;
-static bool g_transparent = false;
-static bool g_overlayEnabled = true;
-static bool g_overlayHiddenForForeground = false;
-static UINT g_width = 1280, g_height = 720;
-static DWORD g_lastFollow = 0;
-static RECT g_lastRect = { 0,0,0,0 };
+static HWND   g_hwnd = nullptr;
+static HWND   g_target = nullptr;
+static DWORD  g_targetPid = 0;
+static bool   g_console = false;
+static bool   g_desktop = false;
+static bool   g_running = true;
+static bool   g_menu = false;
+static bool   g_reshadeInput = false;
+static bool   g_invertDepth = false;
+static bool   g_transparent = false;
+static bool   g_overlayEnabled = true;
+static bool   g_overlayHiddenForForeground = false;
+static UINT   g_width = 1280, g_height = 720;
+static DWORD  g_lastFollow = 0;
+static RECT   g_lastRect = { 0,0,0,0 };
 
 static ID3D11Device* g_dev = nullptr;
 static ID3D11DeviceContext* g_ctx = nullptr;
@@ -178,36 +180,36 @@ static ID3D11ShaderResourceView* g_colorSRV = nullptr;
 static uint64_t g_lastDepthHandle = 0, g_lastColorHandle = 0;
 static uint32_t g_lastDepthW = 0, g_lastDepthH = 0, g_lastDepthFmt = 0;
 static uint32_t g_lastColorW = 0, g_lastColorH = 0, g_lastColorFmt = 0;
-static HRESULT g_lastDepthOpenHR = S_OK, g_lastColorOpenHR = S_OK, g_lastDepthSRVHR = S_OK, g_lastColorSRVHR = S_OK;
-static int g_depthHeuristicDraws = 16;
-static bool g_showFPS = true;
-static float g_fpsColor[4] = { 1.0f, 0.95f, 0.70f, 1.0f };
-static bool g_showFpsColorPicker = false;
-static int g_minimizeKey = VK_F1;
-static int g_menuKey = VK_TAB;
-static int g_waitKeyTarget = 0;
+static HRESULT  g_lastDepthOpenHR = S_OK, g_lastColorOpenHR = S_OK;
+static HRESULT  g_lastDepthSRVHR = S_OK, g_lastColorSRVHR = S_OK;
+static int      g_depthHeuristicDraws = 16;
+static bool     g_showFPS = true;
+static float    g_fpsColor[4] = { 1.0f, 0.95f, 0.70f, 1.0f };
+static bool     g_showFpsColorPicker = false;
+static int  g_minimizeKey = VK_F1;      // 0x70
+
+static int  g_waitKeyTarget = 0;
 static DWORD g_waitKeyStart = 0;
 static float g_fps = 0.0f;
-static int g_fpsFrames = 0;
+static int   g_fpsFrames = 0;
 static DWORD g_fpsTick = 0;
 static std::string g_gpuName = "Unknown GPU";
 static DWORD g_resyncDueTick = 0;
 
-static std::thread g_pipeThread;
-static std::mutex g_pipeMutex;
+static std::thread       g_pipeThread;
+static std::mutex        g_pipeMutex;
 static std::atomic<bool> g_pipeStop{ false };
 static std::atomic<bool> g_pipeConnected{ false };
 static std::atomic<bool> g_hasPayload{ false };
-static PipePayload g_payload;
+static PipePayload       g_payload;
 
-static char g_iniPath[MAX_PATH] = {};
+static char g_iniPath[MAX_PATH] = {};   // overlay_settings.ini
+static char g_reshadeIniPath[MAX_PATH] = {};  // ReShade.ini
 
 static void SetMenu(bool v);
 static void RequestOverlayResync(const char* reason, DWORD delayMs);
 static void ApplyWindowMode();
 static void FocusRoblox();
-
-
 static void Log(const char* fmt, ...)
 {
     char b[2048];
@@ -216,25 +218,6 @@ static void Log(const char* fmt, ...)
     if (g_console) { printf("%s\n", b); fflush(stdout); }
 }
 static bool HasArg(const char* a) { const char* c = GetCommandLineA(); return c && strstr(c, a); }
-
-static void QueryGpuName()
-{
-    IDXGIFactory1* factory = nullptr;
-    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory)))
-        return;
-    IDXGIAdapter1* adapter = nullptr;
-    if (factory->EnumAdapters1(0, &adapter) == S_OK && adapter)
-    {
-        DXGI_ADAPTER_DESC1 desc = {};
-        adapter->GetDesc1(&desc);
-        char name[256] = {};
-        WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, name, sizeof(name), nullptr, nullptr);
-        g_gpuName = name;
-        adapter->Release();
-    }
-    factory->Release();
-}
-
 static void QueryGpuNameFromDevice()
 {
     if (!g_dev) return;
@@ -255,6 +238,7 @@ static void QueryGpuNameFromDevice()
     }
     dxgiDevice->Release();
 }
+
 static void UpdateFPS()
 {
     ++g_fpsFrames;
@@ -267,7 +251,6 @@ static void UpdateFPS()
         g_fpsTick = now;
     }
 }
-
 static const char* VkKeyName(int vk)
 {
     static char name[64];
@@ -276,8 +259,9 @@ static const char* VkKeyName(int vk)
     LONG lp = (LONG)(scan << 16);
     switch (vk)
     {
-    case VK_INSERT: case VK_DELETE: case VK_END: case VK_PRIOR: case VK_NEXT:
-    case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
+    case VK_INSERT: case VK_DELETE: case VK_END:
+    case VK_PRIOR:  case VK_NEXT:  case VK_HOME:
+    case VK_LEFT:   case VK_RIGHT: case VK_UP: case VK_DOWN:
         lp |= (1 << 24);
         break;
     default: break;
@@ -288,14 +272,83 @@ static const char* VkKeyName(int vk)
     return name;
 }
 
+static void WriteReShadeOverlayKey()
+{
+    if (!g_reshadeIniPath[0]) return;
+
+    FILE* rf = fopen(g_reshadeIniPath, "r");
+    std::string content;
+    if (rf)
+    {
+        char line[1024];
+        while (fgets(line, sizeof(line), rf))
+            content += line;
+        fclose(rf);
+    }
+
+    std::string out;
+    bool inInput = false;
+    bool keyWritten = false;
+
+    size_t pos = 0;
+    while (pos < content.size())
+    {
+        size_t nl = content.find('\n', pos);
+        std::string line = content.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos + 1);
+        pos = (nl == std::string::npos) ? content.size() : nl + 1;
+
+        if (!line.empty() && line[0] == '[')
+        {
+            if (inInput && !keyWritten)
+            {
+                out += "KeyOverlay=36,0,0,0\n";
+                keyWritten = true;
+            }
+            inInput = (line.find("[INPUT]") != std::string::npos ||
+                line.find("[Input]") != std::string::npos ||
+                line.find("[input]") != std::string::npos);
+        }
+
+        if (inInput && line.find("KeyOverlay=") != std::string::npos)
+        {
+            out += "KeyOverlay=36,0,0,0\n";
+            keyWritten = true;
+            continue;
+        }
+
+        out += line;
+    }
+
+    if (!keyWritten)
+    {
+        if (!out.empty() && out.back() != '\n')
+            out += "\n";
+        out += "\n[INPUT]\n";
+        out += "KeyOverlay=36,0,0,0\n";
+    }
+
+    if (out == content)
+        return;
+
+    FILE* wf = fopen(g_reshadeIniPath, "w");
+    if (!wf)
+    {
+        Log("[ReShade] cannot write %s", g_reshadeIniPath);
+        return;
+    }
+    fwrite(out.c_str(), 1, out.size(), wf);
+    fclose(wf);
+    Log("[ReShade] KeyOverlay=36,0,0,0 written to %s", g_reshadeIniPath);
+}
+
 static void LoadSettings()
 {
     if (!g_iniPath[0]) return;
     FILE* f = fopen(g_iniPath, "r");
-    if (!f) return; // Если файла нет, просто выходим (он создастся при первом сохранении)
+    if (!f) return;
 
-    char line[256];
-    char section[64] = {};
+    char  line[256];
+    char  section[64] = {};
     while (fgets(line, sizeof(line), f))
     {
         char sec[64];
@@ -305,28 +358,22 @@ static void LoadSettings()
             continue;
         }
 
-        int value = 0;
+        int   value = 0;
         float r = 0, g = 0, b = 0, a = 0;
 
         if (_stricmp(section, "Keybinds") == 0)
         {
             if (sscanf(line, "Minimize=%d", &value) == 1)
             {
-                if (value > 0 && value < 255 && value != 0x24)
+                if (value > 0 && value < 256)
                     g_minimizeKey = value;
             }
-            else if (sscanf(line, "MenuToggle=%d", &value) == 1)
-            {
-                if (value > 0 && value < 255 && value != 0x24)
-                    g_menuKey = value;
-            }
+            
         }
         else if (_stricmp(section, "Style") == 0)
         {
             if (sscanf(line, "ShowFPS=%d", &value) == 1)
-            {
                 g_showFPS = (value != 0);
-            }
             else if (sscanf(line, "FpsColor=%f,%f,%f,%f", &r, &g, &b, &a) == 4)
             {
                 g_fpsColor[0] = std::max(0.0f, std::min(1.0f, r));
@@ -337,12 +384,8 @@ static void LoadSettings()
         }
         else
         {
-            if (sscanf(line, "MenuKey=%d", &value) == 1)
-            {
-                if (value > 0 && value < 255 && value != 0x24)
-                    g_menuKey = value;
-            }
-            else if (sscanf(line, "FpsColor=%f,%f,%f,%f", &r, &g, &b, &a) == 4)
+           
+            if (sscanf(line, "FpsColor=%f,%f,%f,%f", &r, &g, &b, &a) == 4)
             {
                 g_fpsColor[0] = std::max(0.0f, std::min(1.0f, r));
                 g_fpsColor[1] = std::max(0.0f, std::min(1.0f, g));
@@ -361,11 +404,13 @@ static void SaveSettings()
     if (!f) return;
     fprintf(f, "[Keybinds]\n");
     fprintf(f, "Minimize=%d\n", g_minimizeKey);
-    fprintf(f, "MenuToggle=%d\n\n", g_menuKey);
-    fprintf(f, "[Style]\n");
+    fprintf(f, "\n[Style]\n");
     fprintf(f, "ShowFPS=%d\n", g_showFPS ? 1 : 0);
-    fprintf(f, "FpsColor=%.6f,%.6f,%.6f,%.6f\n", g_fpsColor[0], g_fpsColor[1], g_fpsColor[2], g_fpsColor[3]);
+    fprintf(f, "FpsColor=%.6f,%.6f,%.6f,%.6f\n",
+        g_fpsColor[0], g_fpsColor[1], g_fpsColor[2], g_fpsColor[3]);
     fclose(f);
+
+    WriteReShadeOverlayKey();
 }
 
 static bool CaptureKeyIfWaiting()
@@ -376,7 +421,7 @@ static bool CaptureKeyIfWaiting()
     if (GetTickCount() - g_waitKeyStart < 250)
         return true;
 
-    for (int vk = 8; vk < 255; ++vk)
+    for (int vk = 8; vk < 256; ++vk)
     {
         if (!(GetAsyncKeyState(vk) & 1))
             continue;
@@ -394,16 +439,11 @@ static bool CaptureKeyIfWaiting()
             return true;
         }
 
-        if (vk == 0x24)
-            return true;
-
         if (g_waitKeyTarget == 1)
             g_minimizeKey = vk;
-        else if (g_waitKeyTarget == 2)
-            g_menuKey = vk;
 
         g_waitKeyTarget = 0;
-        SaveSettings(); // Мгновенное сохранение при смене клавиши
+        SaveSettings();
         return true;
     }
     return true;
@@ -420,6 +460,7 @@ static bool ReadExact(HANDLE h, void* out, DWORD sz)
     }
     return total == sz;
 }
+
 static void PipeThread()
 {
     Log("[Pipe] waiting for %ls", PIPE_NAME_W);
@@ -428,7 +469,8 @@ static void PipeThread()
         HANDLE h = INVALID_HANDLE_VALUE;
         while (h == INVALID_HANDLE_VALUE && !g_pipeStop.load())
         {
-            h = CreateFileW(PIPE_NAME_W, GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            h = CreateFileW(PIPE_NAME_W, GENERIC_READ, 0, nullptr,
+                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (h == INVALID_HANDLE_VALUE)
             {
                 if (GetLastError() == ERROR_PIPE_BUSY) WaitNamedPipeW(PIPE_NAME_W, 500);
@@ -459,36 +501,70 @@ static void PipeThread()
 
 static const char* VS_SRC = R"HLSL(
 struct O { float4 p:SV_POSITION; float2 uv:TEXCOORD0; };
-O main(uint id:SV_VertexID){ O o; float2 uv=float2((id<<1)&2,id&2); o.uv=uv; o.p=float4(uv*float2(2,-2)+float2(-1,1),0,1); return o; }
+O main(uint id:SV_VertexID){
+    O o;
+    float2 uv = float2((id<<1)&2, id&2);
+    o.uv = uv;
+    o.p  = float4(uv*float2(2,-2)+float2(-1,1),0,1);
+    return o;
+}
 )HLSL";
+
 static const char* PS_COLOR = R"HLSL(
-Texture2D<float4> T:register(t0); SamplerState S:register(s0);
-float4 main(float4 p:SV_POSITION,float2 uv:TEXCOORD0):SV_Target{ float4 c=T.SampleLevel(S,uv,0); return float4(c.rgb,1); }
+Texture2D<float4> T:register(t0);
+SamplerState S:register(s0);
+float4 main(float4 p:SV_POSITION, float2 uv:TEXCOORD0):SV_Target {
+    float4 c = T.SampleLevel(S,uv,0);
+    return float4(c.rgb,1);
+}
 )HLSL";
+
 static const char* PS_DEPTH = R"HLSL(
-Texture2D<float> T:register(t0); SamplerState S:register(s0);
-float main(float4 p:SV_POSITION,float2 uv:TEXCOORD0):SV_Depth{ return saturate(T.SampleLevel(S,uv,0).r); }
+Texture2D<float> T:register(t0);
+SamplerState S:register(s0);
+float main(float4 p:SV_POSITION, float2 uv:TEXCOORD0):SV_Depth {
+    return saturate(T.SampleLevel(S,uv,0).r);
+}
 )HLSL";
+
 static const char* PS_DEPTH_INV = R"HLSL(
-Texture2D<float> T:register(t0); SamplerState S:register(s0);
-float main(float4 p:SV_POSITION,float2 uv:TEXCOORD0):SV_Depth{ return saturate(1.0-T.SampleLevel(S,uv,0).r); }
+Texture2D<float> T:register(t0);
+SamplerState S:register(s0);
+float main(float4 p:SV_POSITION, float2 uv:TEXCOORD0):SV_Depth {
+    return saturate(1.0 - T.SampleLevel(S,uv,0).r);
+}
 )HLSL";
 
 static bool Compile(const char* src, const char* target, ID3DBlob** out)
 {
     ID3DBlob* e = nullptr;
-    HRESULT hr = D3DCompile(src, strlen(src), nullptr, nullptr, nullptr, "main", target, D3DCOMPILE_ENABLE_STRICTNESS, 0, out, &e);
-    if (FAILED(hr)) { Log("[Shader] %s failed: %s", target, e ? (char*)e->GetBufferPointer() : "?"); if (e) e->Release(); return false; }
-    if (e) e->Release(); return true;
+    HRESULT hr = D3DCompile(src, strlen(src), nullptr, nullptr, nullptr,
+        "main", target, D3DCOMPILE_ENABLE_STRICTNESS, 0, out, &e);
+    if (FAILED(hr))
+    {
+        Log("[Shader] %s failed: %s", target, e ? (char*)e->GetBufferPointer() : "?");
+        if (e) e->Release();
+        return false;
+    }
+    if (e) e->Release();
+    return true;
 }
+
 static bool CreateLocalDepth(UINT w, UINT h)
 {
-    SafeRelease(g_localDSV); SafeRelease(g_localDepth);
-    D3D11_TEXTURE2D_DESC d = {}; d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_D32_FLOAT; d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    HRESULT hr = g_dev->CreateTexture2D(&d, nullptr, &g_localDepth); if (FAILED(hr)) return false;
-    D3D11_DEPTH_STENCIL_VIEW_DESC v = {}; v.Format = DXGI_FORMAT_D32_FLOAT; v.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-    hr = g_dev->CreateDepthStencilView(g_localDepth, &v, &g_localDSV); return SUCCEEDED(hr);
+    SafeRelease(g_localDSV);
+    SafeRelease(g_localDepth);
+    D3D11_TEXTURE2D_DESC d = {};
+    d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1;
+    d.Format = DXGI_FORMAT_D32_FLOAT; d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &g_localDepth))) return false;
+    D3D11_DEPTH_STENCIL_VIEW_DESC v = {};
+    v.Format = DXGI_FORMAT_D32_FLOAT;
+    v.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    return SUCCEEDED(g_dev->CreateDepthStencilView(g_localDepth, &v, &g_localDSV));
 }
+
 static bool Resize(UINT w, UINT h)
 {
     if (!w || !h || (w == g_width && h == g_height)) return true;
@@ -497,78 +573,115 @@ static bool Resize(UINT w, UINT h)
     SafeRelease(g_rtv); SafeRelease(g_localDSV); SafeRelease(g_localDepth);
     HRESULT hr = g_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
     if (FAILED(hr)) { Log("[D3D] ResizeBuffers failed 0x%08lX", (unsigned long)hr); return false; }
-    ID3D11Texture2D* bb = nullptr; hr = g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb); if (FAILED(hr) || !bb) return false;
-    g_dev->CreateRenderTargetView(bb, nullptr, &g_rtv); bb->Release(); CreateLocalDepth(w, h); return true;
+    ID3D11Texture2D* bb = nullptr;
+    hr = g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
+    if (FAILED(hr) || !bb) return false;
+    g_dev->CreateRenderTargetView(bb, nullptr, &g_rtv);
+    bb->Release();
+    CreateLocalDepth(w, h);
+    return true;
 }
+
 static bool OpenSharedTex(uint64_t handleValue, ID3D11Texture2D** out, HRESULT* outHr)
 {
-    *out = nullptr; HANDLE h = (HANDLE)(uintptr_t)handleValue;
+    *out = nullptr;
+    HANDLE h = (HANDLE)(uintptr_t)handleValue;
     HRESULT hr = g_dev->OpenSharedResource(h, __uuidof(ID3D11Texture2D), (void**)out);
     if (outHr) *outHr = hr;
     return SUCCEEDED(hr) && *out;
 }
+
 static void UpdateResources(const PipePayload& p)
 {
     if (p.colorHandle && p.colorWidth && p.colorHeight)
     {
-        bool ch = p.colorHandle != g_lastColorHandle || p.colorWidth != g_lastColorW || p.colorHeight != g_lastColorH || p.colorFormat != g_lastColorFmt;
+        bool ch = p.colorHandle != g_lastColorHandle ||
+            p.colorWidth != g_lastColorW ||
+            p.colorHeight != g_lastColorH ||
+            p.colorFormat != g_lastColorFmt;
         if (ch || !g_colorSRV)
         {
             SafeRelease(g_colorSRV); SafeRelease(g_colorTex);
             if (OpenSharedTex(p.colorHandle, &g_colorTex, &g_lastColorOpenHR))
             {
-                D3D11_TEXTURE2D_DESC td = {}; g_colorTex->GetDesc(&td);
-                D3D11_SHADER_RESOURCE_VIEW_DESC s = {}; s.Format = ColorSRVFormat(td.Format); s.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; s.Texture2D.MipLevels = 1;
+                D3D11_TEXTURE2D_DESC td = {};
+                g_colorTex->GetDesc(&td);
+                D3D11_SHADER_RESOURCE_VIEW_DESC s = {};
+                s.Format = ColorSRVFormat(td.Format);
+                s.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                s.Texture2D.MipLevels = 1;
                 g_lastColorSRVHR = g_dev->CreateShaderResourceView(g_colorTex, &s, &g_colorSRV);
-                Log("[Color] %ux%u fmt=%u srvHR=0x%08lX", p.colorWidth, p.colorHeight, td.Format, (unsigned long)g_lastColorSRVHR);
+                Log("[Color] %ux%u fmt=%u srvHR=0x%08lX",
+                    p.colorWidth, p.colorHeight, td.Format, (unsigned long)g_lastColorSRVHR);
             }
             else Log("[Color] Open failed 0x%08lX", (unsigned long)g_lastColorOpenHR);
-            g_lastColorHandle = p.colorHandle; g_lastColorW = p.colorWidth; g_lastColorH = p.colorHeight; g_lastColorFmt = p.colorFormat;
+            g_lastColorHandle = p.colorHandle;
+            g_lastColorW = p.colorWidth; g_lastColorH = p.colorHeight;
+            g_lastColorFmt = p.colorFormat;
             Resize(p.colorWidth, p.colorHeight);
         }
     }
     if (p.depthHandle && (p.depthWidth || p.colorWidth) && (p.depthHeight || p.colorHeight))
     {
-        uint32_t dw = p.depthWidth ? p.depthWidth : p.colorWidth; uint32_t dh = p.depthHeight ? p.depthHeight : p.colorHeight;
-        bool ch = p.depthHandle != g_lastDepthHandle || dw != g_lastDepthW || dh != g_lastDepthH || p.depthFormat != g_lastDepthFmt;
+        uint32_t dw = p.depthWidth ? p.depthWidth : p.colorWidth;
+        uint32_t dh = p.depthHeight ? p.depthHeight : p.colorHeight;
+        bool ch = p.depthHandle != g_lastDepthHandle ||
+            dw != g_lastDepthW || dh != g_lastDepthH ||
+            p.depthFormat != g_lastDepthFmt;
         if (ch || !g_depthSRV)
         {
             SafeRelease(g_depthSRV); SafeRelease(g_depthTex);
             if (OpenSharedTex(p.depthHandle, &g_depthTex, &g_lastDepthOpenHR))
             {
-                D3D11_TEXTURE2D_DESC td = {}; g_depthTex->GetDesc(&td);
-                D3D11_SHADER_RESOURCE_VIEW_DESC s = {}; s.Format = DepthSRVFormat(p.depthFormat ? p.depthFormat : td.Format); s.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; s.Texture2D.MipLevels = 1;
+                D3D11_TEXTURE2D_DESC td = {};
+                g_depthTex->GetDesc(&td);
+                D3D11_SHADER_RESOURCE_VIEW_DESC s = {};
+                s.Format = DepthSRVFormat(p.depthFormat ? p.depthFormat : td.Format);
+                s.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                s.Texture2D.MipLevels = 1;
                 g_lastDepthSRVHR = g_dev->CreateShaderResourceView(g_depthTex, &s, &g_depthSRV);
-                Log("[Depth] %ux%u payloadFmt=%u texFmt=%u srvFmt=%u srvHR=0x%08lX", dw, dh, p.depthFormat, td.Format, s.Format, (unsigned long)g_lastDepthSRVHR);
+                Log("[Depth] %ux%u payloadFmt=%u texFmt=%u srvFmt=%u srvHR=0x%08lX",
+                    dw, dh, p.depthFormat, td.Format, s.Format, (unsigned long)g_lastDepthSRVHR);
             }
             else Log("[Depth] Open failed 0x%08lX", (unsigned long)g_lastDepthOpenHR);
-            g_lastDepthHandle = p.depthHandle; g_lastDepthW = dw; g_lastDepthH = dh; g_lastDepthFmt = p.depthFormat;
+            g_lastDepthHandle = p.depthHandle;
+            g_lastDepthW = dw; g_lastDepthH = dh;
+            g_lastDepthFmt = p.depthFormat;
             if (!g_colorSRV) Resize(dw, dh);
         }
     }
 }
 
-static void DrawTri() { g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST); g_ctx->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr); g_ctx->Draw(3, 0); }
-static void ViewportFull() { D3D11_VIEWPORT v = {}; v.Width = (float)g_width; v.Height = (float)g_height; v.MinDepth = 0; v.MaxDepth = 1; g_ctx->RSSetViewports(1, &v); }
-
+static void DrawTri()
+{
+    g_ctx->IASetInputLayout(nullptr);
+    g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_ctx->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
+    g_ctx->Draw(3, 0);
+}
+static void ViewportFull()
+{
+    D3D11_VIEWPORT v = {};
+    v.Width = (float)g_width;
+    v.Height = (float)g_height;
+    v.MinDepth = 0; v.MaxDepth = 1;
+    g_ctx->RSSetViewports(1, &v);
+}
 static const char* OverlayStatus(const PipePayload& p)
 {
     static char text[192];
-    if (!g_pipeConnected.load())
-        return "Searching pipe";
-    if (!g_hasPayload.load())
-        return "Pipe connected, waiting payload";
+    if (!g_pipeConnected.load())   return "Searching pipe";
+    if (!g_hasPayload.load())      return "Pipe connected, waiting payload";
     bool colorReady = g_colorSRV && p.colorHandle;
     bool depthReady = g_depthSRV && p.depthHandle;
-    if (colorReady && depthReady)
-        return "Connected: color + depth";
-    if (colorReady)
-        return "Connected: color only";
-    if (depthReady)
-        return "Connected: depth only";
+    if (colorReady && depthReady)  return "Connected: color + depth";
+    if (colorReady)                return "Connected: color only";
+    if (depthReady)                return "Connected: depth only";
     if (p.colorHandle || p.depthHandle)
     {
-        snprintf(text, sizeof(text), "Connected: opening resources C=0x%08lX D=0x%08lX", (unsigned long)g_lastColorOpenHR, (unsigned long)g_lastDepthOpenHR);
+        snprintf(text, sizeof(text),
+            "Connected: opening C=0x%08lX D=0x%08lX",
+            (unsigned long)g_lastColorOpenHR, (unsigned long)g_lastDepthOpenHR);
         return text;
     }
     return "Connected: no handles";
@@ -576,12 +689,15 @@ static const char* OverlayStatus(const PipePayload& p)
 
 static void Render()
 {
-    PipePayload p; { std::lock_guard<std::mutex> lk(g_pipeMutex); p = g_payload; }
+    PipePayload p;
+    { std::lock_guard<std::mutex> lk(g_pipeMutex); p = g_payload; }
     UpdateResources(p);
-    float clear[4] = { 0,0,0,g_transparent ? 0.0f : 1.0f };
+
+    float clear[4] = { 0,0,0, g_transparent ? 0.0f : 1.0f };
     g_ctx->ClearRenderTargetView(g_rtv, clear);
     ViewportFull();
 
+    // Color pass
     if (g_colorSRV)
     {
         g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
@@ -591,9 +707,11 @@ static void Render()
         g_ctx->PSSetShaderResources(0, 1, &g_colorSRV);
         g_ctx->PSSetSamplers(0, 1, &g_samp);
         DrawTri();
-        ID3D11ShaderResourceView* n = nullptr; g_ctx->PSSetShaderResources(0, 1, &n);
+        ID3D11ShaderResourceView* n = nullptr;
+        g_ctx->PSSetShaderResources(0, 1, &n);
     }
 
+    // Depth pass
     if (g_depthSRV && g_localDSV)
     {
         g_ctx->ClearDepthStencilView(g_localDSV, D3D11_CLEAR_DEPTH, 1.0f, 0);
@@ -604,29 +722,42 @@ static void Render()
         g_ctx->PSSetShaderResources(0, 1, &g_depthSRV);
         g_ctx->PSSetSamplers(0, 1, &g_samp);
         DrawTri();
-        D3D11_VIEWPORT tiny = {}; tiny.Width = 1; tiny.Height = 1; tiny.MaxDepth = 1; g_ctx->RSSetViewports(1, &tiny);
-        for (int i = 0;i < g_depthHeuristicDraws;i++) DrawTri();
+        D3D11_VIEWPORT tiny = {};
+        tiny.Width = 1; tiny.Height = 1; tiny.MaxDepth = 1;
+        g_ctx->RSSetViewports(1, &tiny);
+        for (int i = 0; i < g_depthHeuristicDraws; i++) DrawTri();
         ViewportFull();
-        ID3D11ShaderResourceView* n = nullptr; g_ctx->PSSetShaderResources(0, 1, &n);
+        ID3D11ShaderResourceView* n = nullptr;
+        g_ctx->PSSetShaderResources(0, 1, &n);
     }
 
-    ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
+    // ImGui
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    // FPS overlay
     if (g_showFPS)
     {
         ImGui::SetNextWindowBgAlpha(0.35f);
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-        ImGui::Begin("##fps_counter", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav);
-        ImGui::TextColored(ImVec4(g_fpsColor[0], g_fpsColor[1], g_fpsColor[2], g_fpsColor[3]), "%.0f fps", g_fps);
+        ImGui::Begin("##fps", nullptr,
+            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoNav);
+        ImGui::TextColored(
+            ImVec4(g_fpsColor[0], g_fpsColor[1], g_fpsColor[2], g_fpsColor[3]),
+            "%.0f fps", g_fps);
         ImGui::End();
     }
 
-
+    // Menu
     if (g_menu)
     {
-        ImGui::SetNextWindowSize(ImVec2(560, 300), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(560, 280), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowBgAlpha(0.78f);
-        ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse;
-        if (ImGui::Begin("\xE2\x96\xBE  Overlay Control", &g_menu, flags))
+        if (ImGui::Begin("\xE2\x96\xBE  Overlay Control", &g_menu,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse))
         {
             ImGui::TextDisabled("SYSTEM STATUS");
             ImGui::Separator();
@@ -637,57 +768,54 @@ static void Render()
             ImGui::TextDisabled("OPTIONS");
             ImGui::Separator();
 
-            // Мгновенное сохранение при клике на чекбокс
             if (ImGui::Checkbox("Show FPS", &g_showFPS))
-            {
                 SaveSettings();
-            }
 
             if (ImGui::Button("FPS counter color", ImVec2(160, 22)))
                 g_showFpsColorPicker = !g_showFpsColorPicker;
             ImGui::SameLine();
-            ImGui::ColorButton("##fps_color_preview", ImVec4(g_fpsColor[0], g_fpsColor[1], g_fpsColor[2], g_fpsColor[3]), ImGuiColorEditFlags_NoTooltip, ImVec2(22, 22));
+            ImGui::ColorButton("##fps_col",
+                ImVec4(g_fpsColor[0], g_fpsColor[1], g_fpsColor[2], g_fpsColor[3]),
+                ImGuiColorEditFlags_NoTooltip, ImVec2(22, 22));
             if (g_showFpsColorPicker)
             {
-                // Мгновенное сохранение при изменении цвета
-                if (ImGui::ColorPicker4("##fps_color_picker", g_fpsColor, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview | ImGuiColorEditFlags_AlphaBar))
+                if (ImGui::ColorPicker4("##fps_picker", g_fpsColor,
+                    ImGuiColorEditFlags_NoSidePreview |
+                    ImGuiColorEditFlags_NoSmallPreview |
+                    ImGuiColorEditFlags_AlphaBar))
                     SaveSettings();
             }
 
             ImGui::Spacing();
             ImGui::TextDisabled("KEYBINDS");
             ImGui::Separator();
+
+            // Minimize / overlay toggle key
             char minLabel[128];
-            snprintf(minLabel, sizeof(minLabel), g_waitKeyTarget == 1 ? "Overlay On/Off Key: [press key...]" : "Overlay On/Off Key: [%s]", VkKeyName(g_minimizeKey));
+            snprintf(minLabel, sizeof(minLabel),
+                g_waitKeyTarget == 1
+                ? "Overlay On/Off Key: [press key...]"
+                : "Overlay On/Off Key: [%s]",
+                VkKeyName(g_minimizeKey));
             if (ImGui::Button(minLabel, ImVec2(-1, 22)))
             {
                 g_waitKeyTarget = 1;
                 g_waitKeyStart = GetTickCount();
-                for (int i = 0; i < 255; ++i) GetAsyncKeyState(i);
+                for (int i = 0; i < 256; ++i) GetAsyncKeyState(i);
             }
 
-            char keyLabel[128];
-            snprintf(keyLabel, sizeof(keyLabel), g_waitKeyTarget == 2 ? "Toggle Menu Key: [press key...]" : "Toggle Menu Key: [Shift + %s]", VkKeyName(g_menuKey));
-            if (ImGui::Button(keyLabel, ImVec2(-1, 22)))
-            {
-                g_waitKeyTarget = 2;
-                g_waitKeyStart = GetTickCount();
-                for (int i = 0; i < 255; ++i) GetAsyncKeyState(i);
-            }
             if (g_waitKeyTarget)
-                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.30f, 1.0f), "Press any key. ESC = cancel.");
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.30f, 1.0f),
+                    "Press any key. ESC = cancel.");
+
             ImGui::Separator();
             if (ImGui::Button("Exit Overlay", ImVec2(-1, 24)))
                 g_running = false;
-
-            if (ImGui::IsItemHovered()) {}
-            ImGui::Spacing();
-            ImGui::TextDisabled("Menu opens with Shift + selected key. F1 overlay on/off. F11 fullscreen+resync.");
-            ImGui::TextDisabled("F8 = ReShade input. Menu key is always Shift + selected key.");
         }
         ImGui::End();
     }
 
+    // Sync menu open/close → focus
     static bool lastMenuState = false;
     if (lastMenuState != g_menu)
     {
@@ -700,13 +828,29 @@ static void Render()
     g_ctx->OMSetRenderTargets(1, &g_rtv, g_localDSV);
     g_ctx->OMSetDepthStencilState(g_dsOff, 0);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
     g_ctx->OMSetRenderTargets(1, &g_rtv, g_localDSV);
+
     g_swap->Present(1, 0);
 }
 
-static HWND FindTarget() { HWND h = FindWindowA(nullptr, "Roblox"); if (h) GetWindowThreadProcessId(h, &g_targetPid); return h; }
-static RECT TargetRect() { RECT r = { 100,100,100 + (LONG)g_width,100 + (LONG)g_height }; if (!g_desktop && g_target && IsWindow(g_target)) { GetWindowThreadProcessId(g_target, &g_targetPid); GetWindowRect(g_target, &r); } else if (g_desktop) SystemParametersInfoA(SPI_GETWORKAREA, 0, &r, 0); return r; }
+static HWND FindTarget()
+{
+    HWND h = FindWindowA(nullptr, "Roblox");
+    if (h) GetWindowThreadProcessId(h, &g_targetPid);
+    return h;
+}
+static RECT TargetRect()
+{
+    RECT r = { 100,100,100 + (LONG)g_width,100 + (LONG)g_height };
+    if (!g_desktop && g_target && IsWindow(g_target))
+    {
+        GetWindowThreadProcessId(g_target, &g_targetPid);
+        GetWindowRect(g_target, &r);
+    }
+    else if (g_desktop)
+        SystemParametersInfoA(SPI_GETWORKAREA, 0, &r, 0);
+    return r;
+}
 static void FocusRoblox()
 {
     if (g_target && IsWindow(g_target))
@@ -716,12 +860,11 @@ static void FocusRoblox()
 static bool ForegroundIsRobloxOrOverlay()
 {
     HWND fg = GetForegroundWindow();
-    if (!fg) return true;
-    if (fg == g_hwnd) return true;
+    if (!fg)              return true;
+    if (fg == g_hwnd)     return true;
 
     DWORD fgPid = 0;
     GetWindowThreadProcessId(fg, &fgPid);
-
     if (fgPid == GetCurrentProcessId()) return true;
 
     if (g_target && IsWindow(g_target))
@@ -731,7 +874,6 @@ static bool ForegroundIsRobloxOrOverlay()
         if (robloxPid) g_targetPid = robloxPid;
         if (fg == g_target || IsChild(g_target, fg)) return true;
     }
-
     if (g_targetPid && fgPid == g_targetPid) return true;
     return false;
 }
@@ -746,12 +888,12 @@ static void UpdateForegroundVisibility()
         if (!g_overlayHiddenForForeground)
         {
             ShowWindow(g_hwnd, SW_HIDE);
-            SetWindowPos(g_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetWindowPos(g_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             g_overlayHiddenForForeground = true;
         }
         return;
     }
-
     if (g_overlayHiddenForForeground)
     {
         ShowWindow(g_hwnd, SW_SHOWNA);
@@ -759,6 +901,7 @@ static void UpdateForegroundVisibility()
         g_lastRect = { 0,0,0,0 };
     }
 }
+
 static LONG_PTR ExStyle()
 {
     LONG_PTR e = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
@@ -766,6 +909,7 @@ static LONG_PTR ExStyle()
         e |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
     return e;
 }
+
 static void ApplyWindowMode()
 {
     if (!g_hwnd) return;
@@ -780,9 +924,9 @@ static void ApplyWindowMode()
         SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_SHOWWINDOW |
         ((g_menu || g_reshadeInput) ? 0 : SWP_NOACTIVATE));
 
-    if (!g_menu && !g_reshadeInput)
-        FocusRoblox();
+    if (!g_menu && !g_reshadeInput) FocusRoblox();
 }
+
 static void SetMenu(bool v)
 {
     g_menu = v;
@@ -791,25 +935,23 @@ static void SetMenu(bool v)
     if (v) { SetForegroundWindow(g_hwnd); SetFocus(g_hwnd); }
     else FocusRoblox();
 }
+
 static void SetReShadeInput(bool v)
 {
     g_reshadeInput = v;
     if (v) g_menu = false;
     ApplyWindowMode();
-    if (v)
-    {
-        SetForegroundWindow(g_hwnd); SetFocus(g_hwnd);
-    }
+    if (v) { SetForegroundWindow(g_hwnd); SetFocus(g_hwnd); }
     else FocusRoblox();
 }
+
 static void SendKeyToRoblox(WORD vk, bool forceSend = false)
 {
     if (!g_target || !IsWindow(g_target)) return;
-    HWND fg = GetForegroundWindow();
     ShowWindow(g_target, SW_SHOW);
     SetForegroundWindow(g_target);
     Sleep(30);
-    if (forceSend || fg != g_target)
+    if (forceSend || GetForegroundWindow() != g_target)
     {
         INPUT in[2] = {};
         in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = vk;
@@ -818,33 +960,99 @@ static void SendKeyToRoblox(WORD vk, bool forceSend = false)
     }
 }
 
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
-static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) { if (g_menu && ImGui_ImplWin32_WndProcHandler(h, m, w, l)) return TRUE; if (m == WM_DESTROY) { g_running = false;PostQuitMessage(0);return 0; } return DefWindowProcA(h, m, w, l); }
+static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    if (g_menu && ImGui_ImplWin32_WndProcHandler(h, m, w, l))
+        return TRUE;
+    if (m == WM_DESTROY) { g_running = false; PostQuitMessage(0); return 0; }
+    return DefWindowProcA(h, m, w, l);
+}
+
 
 static bool InitWindow()
 {
-    if (!g_desktop) { g_target = FindTarget(); if (!g_target) { Log("[Window] Roblox not found");return false; } }
-    RECT r = TargetRect(); g_width = std::max<UINT>(1, r.right - r.left); g_height = std::max<UINT>(1, r.bottom - r.top);
-    WNDCLASSEXA wc = {}; wc.cbSize = sizeof(wc); wc.lpfnWndProc = WndProc; wc.hInstance = GetModuleHandleA(nullptr); wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.lpszClassName = "FixedHookStatusPipeOverlay"; RegisterClassExA(&wc);
-    g_hwnd = CreateWindowExA(ExStyle(), wc.lpszClassName, "FeatureModule Overlay", WS_POPUP, r.left, r.top, g_width, g_height, nullptr, nullptr, wc.hInstance, nullptr); if (!g_hwnd)return false;
-    MARGINS ma = { -1,-1,-1,-1 }; DwmExtendFrameIntoClientArea(g_hwnd, &ma); ApplyWindowMode(); ShowWindow(g_hwnd, SW_SHOWNA); return true;
+    if (!g_desktop)
+    {
+        g_target = FindTarget();
+        if (!g_target) { Log("[Window] Roblox not found"); return false; }
+    }
+    RECT r = TargetRect();
+    g_width = std::max<UINT>(1, r.right - r.left);
+    g_height = std::max<UINT>(1, r.bottom - r.top);
+
+    WNDCLASSEXA wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = "FixedHookStatusPipeOverlay";
+    RegisterClassExA(&wc);
+
+    g_hwnd = CreateWindowExA(ExStyle(), wc.lpszClassName, "FeatureModule Overlay",
+        WS_POPUP, r.left, r.top, g_width, g_height,
+        nullptr, nullptr, wc.hInstance, nullptr);
+    if (!g_hwnd) return false;
+
+    MARGINS ma = { -1,-1,-1,-1 };
+    DwmExtendFrameIntoClientArea(g_hwnd, &ma);
+    ApplyWindowMode();
+    ShowWindow(g_hwnd, SW_SHOWNA);
+    return true;
 }
+
 static bool InitD3D()
 {
-    DXGI_SWAP_CHAIN_DESC sd = {}; sd.BufferCount = 2; sd.BufferDesc.Width = g_width; sd.BufferDesc.Height = g_height; sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.OutputWindow = g_hwnd; sd.SampleDesc.Count = 1; sd.Windowed = TRUE; sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-    D3D_FEATURE_LEVEL fl; D3D_FEATURE_LEVEL lv[] = { D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0 };
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, lv, 2, D3D11_SDK_VERSION, &sd, &g_swap, &g_dev, &fl, &g_ctx);
-    if (FAILED(hr)) hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, lv, 2, D3D11_SDK_VERSION, &sd, &g_swap, &g_dev, &fl, &g_ctx);
+    DXGI_SWAP_CHAIN_DESC sd = {};
+    sd.BufferCount = 2;
+    sd.BufferDesc.Width = g_width;
+    sd.BufferDesc.Height = g_height;
+    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow = g_hwnd;
+    sd.SampleDesc.Count = 1;
+    sd.Windowed = TRUE;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+    D3D_FEATURE_LEVEL fl;
+    D3D_FEATURE_LEVEL lv[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, lv, 2, D3D11_SDK_VERSION,
+        &sd, &g_swap, &g_dev, &fl, &g_ctx);
+    if (FAILED(hr))
+        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, lv, 2, D3D11_SDK_VERSION,
+            &sd, &g_swap, &g_dev, &fl, &g_ctx);
     if (FAILED(hr)) return false;
-    ID3D11Texture2D* bb = nullptr; g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb); g_dev->CreateRenderTargetView(bb, nullptr, &g_rtv); bb->Release(); CreateLocalDepth(g_width, g_height);
-    ID3DBlob* b = nullptr; Compile(VS_SRC, "vs_5_0", &b); g_dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_vs); b->Release();
-    Compile(PS_COLOR, "ps_5_0", &b); g_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_psColor); b->Release();
-    Compile(PS_DEPTH, "ps_5_0", &b); g_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_psDepth); b->Release();
+
+    ID3D11Texture2D* bb = nullptr;
+    g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
+    g_dev->CreateRenderTargetView(bb, nullptr, &g_rtv);
+    bb->Release();
+    CreateLocalDepth(g_width, g_height);
+
+    ID3DBlob* b = nullptr;
+    Compile(VS_SRC, "vs_5_0", &b); g_dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_vs);       b->Release();
+    Compile(PS_COLOR, "ps_5_0", &b); g_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_psColor);  b->Release();
+    Compile(PS_DEPTH, "ps_5_0", &b); g_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_psDepth);  b->Release();
     Compile(PS_DEPTH_INV, "ps_5_0", &b); g_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_psDepthInv); b->Release();
-    D3D11_DEPTH_STENCIL_DESC ds = {}; ds.DepthEnable = TRUE; ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; ds.DepthFunc = D3D11_COMPARISON_ALWAYS; g_dev->CreateDepthStencilState(&ds, &g_dsWrite); ds = {}; ds.DepthEnable = FALSE; g_dev->CreateDepthStencilState(&ds, &g_dsOff);
-    D3D11_SAMPLER_DESC sp = {}; sp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sp.AddressU = sp.AddressV = sp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; g_dev->CreateSamplerState(&sp, &g_samp);
+
+    D3D11_DEPTH_STENCIL_DESC ds = {};
+    ds.DepthEnable = TRUE;
+    ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    ds.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    g_dev->CreateDepthStencilState(&ds, &g_dsWrite);
+    ds = {}; ds.DepthEnable = FALSE;
+    g_dev->CreateDepthStencilState(&ds, &g_dsOff);
+
+    D3D11_SAMPLER_DESC sp = {};
+    sp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sp.AddressU = sp.AddressV = sp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    g_dev->CreateSamplerState(&sp, &g_samp);
+
     QueryGpuNameFromDevice();
-    IMGUI_CHECKVERSION(); ImGui::CreateContext();
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
     ImGui::StyleColorsDark();
     {
         ImGuiStyle& st = ImGui::GetStyle();
@@ -866,18 +1074,29 @@ static bool InitD3D()
         c[ImGuiCol_ButtonHovered] = ImVec4(0.055f, 0.060f, 0.070f, 0.95f);
         c[ImGuiCol_ButtonActive] = ImVec4(0.085f, 0.090f, 0.100f, 1.00f);
     }
-    QueryGpuName();
-    ImGui_ImplWin32_Init(g_hwnd); ImGui_ImplDX11_Init(g_dev, g_ctx);
+    ImGui_ImplWin32_Init(g_hwnd);
+    ImGui_ImplDX11_Init(g_dev, g_ctx);
     return true;
 }
-static void Follow() {
-    if (g_desktop)return;
+
+
+static void Follow()
+{
+    if (g_desktop) return;
     UpdateForegroundVisibility();
     if (!g_overlayEnabled || g_overlayHiddenForForeground) return;
-    DWORD now = GetTickCount(); if (now - g_lastFollow < 50)return; g_lastFollow = now;
-    if (!g_target || !IsWindow(g_target)) { g_target = FindTarget();return; }
+    DWORD now = GetTickCount();
+    if (now - g_lastFollow < 50) return;
+    g_lastFollow = now;
+    if (!g_target || !IsWindow(g_target)) { g_target = FindTarget(); return; }
     RECT r = TargetRect();
-    if (memcmp(&r, &g_lastRect, sizeof(r))) { g_lastRect = r; SetWindowPos(g_hwnd, HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top, (g_menu || g_reshadeInput) ? SWP_SHOWWINDOW : (SWP_SHOWWINDOW | SWP_NOACTIVATE)); }
+    if (memcmp(&r, &g_lastRect, sizeof(r)))
+    {
+        g_lastRect = r;
+        SetWindowPos(g_hwnd, HWND_TOPMOST,
+            r.left, r.top, r.right - r.left, r.bottom - r.top,
+            (g_menu || g_reshadeInput) ? SWP_SHOWWINDOW : (SWP_SHOWWINDOW | SWP_NOACTIVATE));
+    }
 }
 
 static void RequestOverlayResync(const char* reason, DWORD delayMs)
@@ -890,6 +1109,7 @@ static void RequestOverlayResync(const char* reason, DWORD delayMs)
     g_lastRect = { 0,0,0,0 };
     g_resyncDueTick = GetTickCount() + delayMs;
 }
+
 static void ProcessOverlayResync()
 {
     if (!g_resyncDueTick) return;
@@ -897,8 +1117,7 @@ static void ProcessOverlayResync()
     if ((LONG)(now - g_resyncDueTick) < 0) return;
     g_resyncDueTick = 0;
 
-    if (!g_desktop)
-        g_target = FindTarget();
+    if (!g_desktop) g_target = FindTarget();
     RECT r = TargetRect();
     UINT nw = std::max<UINT>(1, (UINT)(r.right - r.left));
     UINT nh = std::max<UINT>(1, (UINT)(r.bottom - r.top));
@@ -912,17 +1131,19 @@ static void ProcessOverlayResync()
     }
     Log("[Resync] applied: %ux%u at %ld,%ld", nw, nh, r.left, r.top);
 }
+
 static void Hotkeys()
 {
     if (CaptureKeyIfWaiting())
         return;
 
     static bool pMenu = false, pF8 = false, pF1 = false, pF11 = false;
+
     bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-    bool menuKeyDown = (GetAsyncKeyState(g_menuKey) & 0x8000) != 0;
-    bool menuCombo = shift && menuKeyDown;
+    bool tabDown = (GetAsyncKeyState(VK_TAB) & 0x8000) != 0;
+    bool menuCombo = shift && tabDown;
     bool f8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
-    bool minimizeKeyDown = (GetAsyncKeyState(g_minimizeKey) & 0x8000) != 0;
+    bool minKeyDown = (GetAsyncKeyState(g_minimizeKey) & 0x8000) != 0;
     bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
 
     if (menuCombo && !pMenu && !g_reshadeInput)
@@ -935,7 +1156,7 @@ static void Hotkeys()
         ApplyWindowMode();
     }
 
-    if (minimizeKeyDown && !pF1)
+    if (minKeyDown && !pF1)
     {
         g_overlayEnabled = !g_overlayEnabled;
         g_menu = false;
@@ -943,17 +1164,18 @@ static void Hotkeys()
         if (!g_overlayEnabled)
         {
             ShowWindow(g_hwnd, SW_HIDE);
-            SetWindowPos(g_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetWindowPos(g_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             FocusRoblox();
-            Log("[Overlay] disabled by F1");
+            Log("[Overlay] disabled");
         }
         else
         {
             g_overlayHiddenForForeground = false;
             ShowWindow(g_hwnd, SW_SHOWNA);
             ApplyWindowMode();
-            RequestOverlayResync("F1 enable/resync", 500);
-            Log("[Overlay] enabled by F1");
+            RequestOverlayResync("minimize key enable/resync", 500);
+            Log("[Overlay] enabled");
         }
     }
 
@@ -966,35 +1188,54 @@ static void Hotkeys()
         g_overlayEnabled = true;
         RequestOverlayResync("F11 fullscreen transition", 1600);
     }
-
+  
     if (GetAsyncKeyState(VK_F2) & 1)
         g_invertDepth = !g_invertDepth;
+
     if (GetAsyncKeyState(VK_END) & 1)
         g_running = false;
 
-    pMenu = menuCombo; pF8 = f8; pF1 = minimizeKeyDown; pF11 = f11;
+    pMenu = menuCombo; pF8 = f8; pF1 = minKeyDown; pF11 = f11;
 }
+
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
 {
-    g_console = HasArg("/console"); g_desktop = HasArg("/desktop"); g_menu = HasArg("/menu"); g_transparent = HasArg("/transparent"); if (HasArg("/no-depth-heuristic"))g_depthHeuristicDraws = 0;
+    g_console = HasArg("/console");
+    g_desktop = HasArg("/desktop");
+    g_menu = HasArg("/menu");
+    g_transparent = HasArg("/transparent");
+    if (HasArg("/no-depth-heuristic")) g_depthHeuristicDraws = 0;
 
-    // ФОРМИРУЕМ ПУТЬ К ФАЙЛУ НАСТРОЕК И ЗАГРУЖАЕМ ИХ
+    //Пути к файлам настроек
     char exe[MAX_PATH] = {};
     GetModuleFileNameA(nullptr, exe, MAX_PATH);
     char* slash = strrchr(exe, '\\');
-    if (slash) {
-        *(slash + 1) = 0;
+    if (slash)
+    {
+        *(slash + 1) = '\0';
         snprintf(g_iniPath, MAX_PATH, "%soverlay_settings.ini", exe);
+        snprintf(g_reshadeIniPath, MAX_PATH, "%sReShade.ini", exe);
     }
-    LoadSettings();
 
-    if (g_console) { AllocConsole();freopen("CONOUT$", "w", stdout);freopen("CONOUT$", "w", stderr); }
-    Log("FeatureModule Overlay starting");
-    if (!InitWindow()) { Log("Window init failed");return 1; }
-    if (!InitD3D()) { Log("D3D init failed");return 2; }
+    //Загружаем настройки
+    LoadSettings();
+    WriteReShadeOverlayKey();
+
+    if (g_console)
+    {
+        AllocConsole();
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
+    }
+    Log("FeatureModule Overlay starting (menu=Shift+Tab, minimizeKey=%d=%s)",
+        g_minimizeKey, VkKeyName(g_minimizeKey));
+
+    if (!InitWindow()) { Log("Window init failed"); return 1; }
+    if (!InitD3D()) { Log("D3D init failed");    return 2; }
 
     g_pipeThread = std::thread(PipeThread);
+
     MSG msg = {};
     while (g_running)
     {
@@ -1002,7 +1243,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         {
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
-            if (msg.message == WM_QUIT)g_running = false;
+            if (msg.message == WM_QUIT) g_running = false;
         }
         Hotkeys();
         Follow();
@@ -1020,11 +1261,22 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     }
 
     g_pipeStop = true;
-    if (g_pipeThread.joinable())g_pipeThread.join();
+    if (g_pipeThread.joinable()) g_pipeThread.join();
+
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
-    SafeRelease(g_colorSRV);SafeRelease(g_colorTex);SafeRelease(g_depthSRV);SafeRelease(g_depthTex);SafeRelease(g_rtv);SafeRelease(g_localDSV);SafeRelease(g_localDepth);SafeRelease(g_swap);SafeRelease(g_ctx);SafeRelease(g_dev);
-    if (g_console)FreeConsole();
+
+    SafeRelease(g_colorSRV);  SafeRelease(g_colorTex);
+    SafeRelease(g_depthSRV);  SafeRelease(g_depthTex);
+    SafeRelease(g_rtv);
+    SafeRelease(g_localDSV);  SafeRelease(g_localDepth);
+    SafeRelease(g_dsWrite);   SafeRelease(g_dsOff);
+    SafeRelease(g_samp);
+    SafeRelease(g_vs);
+    SafeRelease(g_psColor);   SafeRelease(g_psDepth);  SafeRelease(g_psDepthInv);
+    SafeRelease(g_swap);      SafeRelease(g_ctx);       SafeRelease(g_dev);
+
+    if (g_console) FreeConsole();
     return 0;
 }
