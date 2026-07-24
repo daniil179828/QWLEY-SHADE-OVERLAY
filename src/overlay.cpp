@@ -1063,16 +1063,16 @@ static bool InitD3D()
         st.WindowPadding = ImVec2(12, 12);
         st.ItemSpacing = ImVec2(8, 8);
         ImVec4* c = st.Colors;
-        c[ImGuiCol_WindowBg] = ImVec4(0.039f, 0.039f, 0.071f, 0.92f);
-        c[ImGuiCol_TitleBg] = ImVec4(0.086f, 0.090f, 0.114f, 0.95f);
-        c[ImGuiCol_TitleBgActive] = ImVec4(0.106f, 0.114f, 0.149f, 0.97f);
-        c[ImGuiCol_Border] = ImVec4(0.137f, 0.141f, 0.169f, 0.6f);
-        c[ImGuiCol_FrameBg] = ImVec4(0.086f, 0.086f, 0.114f, 0.9f);
-        c[ImGuiCol_FrameBgHovered] = ImVec4(0.153f, 0.180f, 0.259f, 0.95f);
-        c[ImGuiCol_CheckMark] = ImVec4(0.31f, 0.553f, 1.0f, 1.0f);
-        c[ImGuiCol_Button] = ImVec4(0.086f, 0.086f, 0.114f, 0.95f);
-        c[ImGuiCol_ButtonHovered] = ImVec4(0.137f, 0.149f, 0.188f, 0.98f);
-        c[ImGuiCol_ButtonActive] = ImVec4(0.165f, 0.208f, 0.322f, 1.0f);
+        c[ImGuiCol_WindowBg] = ImVec4(0.05f, 0.05f, 0.05f, 0.95f);
+        c[ImGuiCol_TitleBg] = ImVec4(0.95f, 0.95f, 0.95f, 0.98f);
+        c[ImGuiCol_TitleBgActive] = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+        c[ImGuiCol_Border] = ImVec4(0.2f, 0.2f, 0.2f, 0.8f);
+        c[ImGuiCol_FrameBg] = ImVec4(0.9f, 0.9f, 0.9f, 0.95f);
+        c[ImGuiCol_FrameBgHovered] = ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
+        c[ImGuiCol_CheckMark] = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+        c[ImGuiCol_Button] = ImVec4(0.85f, 0.85f, 0.85f, 0.95f);
+        c[ImGuiCol_ButtonHovered] = ImVec4(0.75f, 0.75f, 0.75f, 1.0f);
+        c[ImGuiCol_ButtonActive] = ImVec4(0.65f, 0.65f, 0.65f, 1.0f);
     }
     ImGui_ImplWin32_Init(g_hwnd);
     ImGui_ImplDX11_Init(g_dev, g_ctx);
