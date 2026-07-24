@@ -11,6 +11,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
+#include <commdlg.h>   // For OPENFILENAMEA / GetOpenFileNameA (file dialog)
 #include <stdint.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -25,6 +26,8 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+
+#pragma comment(lib, "comdlg32.lib")  // Link ComDlg32 for file dialog
 
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
@@ -1573,8 +1576,8 @@ static void ProcessOverlayResync()
 
     if (!g_desktop) g_target = FindTarget();
     RECT r = TargetRect();
-    UINT nw = std::max<UINT>(1, (UINT)(r.right - r.left));
-    UINT nh = std::max<UINT>(1, (UINT)(r.bottom - r.top));
+    int nw = std::max<int>(1, (int)(r.right - r.left));
+    int nh = std::max<int>(1, (int)(r.bottom - r.top));
     SetWindowPos(g_hwnd, HWND_TOPMOST, r.left, r.top, nw, nh, SWP_SHOWWINDOW | SWP_NOACTIVATE);
     Resize(nw, nh);
     ApplyWindowMode();
