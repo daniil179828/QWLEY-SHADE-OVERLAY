@@ -1152,190 +1152,50 @@ static void Render()
         ImGui::End();
     }
 
-    // ====================== PROFESSIONAL MENU (like screenshot) ======================
+    // ====================== WORKING MENU ======================
     if (g_menu)
     {
-        ImGui::SetNextWindowSize(ImVec2(1100, 680), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowBgAlpha(0.95f);
+        ImGui::SetNextWindowSize(ImVec2(720, 480), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowBgAlpha(0.92f);
 
-        if (ImGui::Begin("QWLEY SHADE - Video Editor", &g_menu,
-            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar))
+        if (ImGui::Begin("QWLEY SHADE - Recorder + Player", &g_menu,
+            ImGuiWindowFlags_NoCollapse))
         {
-            // Top Menu Bar
-            if (ImGui::BeginMenuBar())
-            {
-                if (ImGui::BeginMenu("File"))
-                {
-                    if (ImGui::MenuItem("Load Recording...")) {
-                        char path[MAX_PATH] = {};
-                        OPENFILENAMEA ofn{};
-                        ofn.lStructSize = sizeof(OPENFILENAMEA);
-                        ofn.hwndOwner = g_hwnd;
-                        ofn.lpstrFilter = "All Files\0*.*\0";
-                        ofn.lpstrFile = path;
-                        ofn.nMaxFile = MAX_PATH;
-                        ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
-                        if (GetOpenFileNameA(&ofn)) {
-                            std::string dir = std::filesystem::path(path).parent_path().string();
-                            StartPlayback(dir);
-                        }
-                    }
-                    if (ImGui::MenuItem("Exit")) g_running = false;
-                    ImGui::EndMenu();
-                }
-                if (ImGui::BeginMenu("View"))
-                {
-                    ImGui::MenuItem("Show FPS", NULL, &g_showFPS);
-                    ImGui::EndMenu();
-                }
-                ImGui::EndMenuBar();
-            }
-
-            // === TOP TAB BAR (like screenshot) ===
-            static int currentTab = 1; // 0=Recordings, 1=Home, 2=Preview, 3=Settings, 4=Log
-
-            ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.15f, 0.08f, 0.22f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.35f, 0.15f, 0.45f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_TabActive, ImVec4(0.55f, 0.18f, 0.75f, 1.0f));
-
-            if (ImGui::BeginTabBar("MainTabs", ImGuiTabBarFlags_Reorderable))
-            {
-                if (ImGui::BeginTabItem("Recordings")) { currentTab = 0; ImGui::EndTabItem(); }
-                if (ImGui::BeginTabItem("Home", 0, ImGuiTabItemFlags_SetSelected)) { currentTab = 1; ImGui::EndTabItem(); }
-                if (ImGui::BeginTabItem("Preview")) { currentTab = 2; ImGui::EndTabItem(); }
-                if (ImGui::BeginTabItem("Settings")) { currentTab = 3; ImGui::EndTabItem(); }
-                if (ImGui::BeginTabItem("Log")) { currentTab = 4; ImGui::EndTabItem(); }
-                ImGui::EndTabBar();
-            }
-            ImGui::PopStyleColor(3);
+            ImGui::TextDisabled("Record raw video → Apply ReShade effects on playback (via Pipe)");
 
             ImGui::Separator();
 
-            // ====================== HOME / PREVIEW TAB ======================
-            if (currentTab == 1 || currentTab == 2)
+            // === RECORDING SECTION ===
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "RECORDING");
+            ImGui::Separator();
+
+            if (!g_recording)
             {
-                // Left Panel - Effects List
-                ImGui::BeginChild("EffectsList", ImVec2(260, 0), true);
-                ImGui::TextColored(ImVec4(0.85f, 0.6f, 1.0f, 1.0f), "SSR Effects");
-                ImGui::Separator();
-
-                static int selectedEffect = 0;
-                const char* effects[] = {
-                    "SSR [qUINT_ssr.fx]",
-                    "BaBa_SSR_Lite",
-                    "BaBa_SSR [BaBa_SSR_Lite.fx]",
-                    "LUMENITE_SSR",
-                    "SSRT [SSRT.fx]"
-                };
-
-                for (int i = 0; i < IM_ARRAYSIZE(effects); i++)
-                {
-                    if (ImGui::Selectable(effects[i], selectedEffect == i))
-                        selectedEffect = i;
-                }
-
-                ImGui::Spacing();
-                ImGui::TextDisabled("Active to top");
-                if (ImGui::Button("Edit global preprocessor", ImVec2(-1, 24)))
-                {
-                    // placeholder
-                }
-                ImGui::EndChild();
-
-                ImGui::SameLine();
-
-                // Parameters Panel
-                ImGui::BeginChild("Parameters", ImVec2(320, 0), true);
-
-                ImGui::TextColored(ImVec4(0.85f, 0.6f, 1.0f, 1.0f), "qUINT_ssr.fx");
-                if (ImGui::Button("Reset all to default", ImVec2(-1, 22))) {}
-
-                // Global
-                if (ImGui::CollapsingHeader("Global", ImGuiTreeNodeFlags_DefaultOpen))
-                {
-                    static float fov = 80.0f, reflInt = 5.0f, reflExp = 5.0f, fade = 0.8f;
-                    ImGui::SliderFloat("Vertical Field of View", &fov, 30.0f, 120.0f);
-                    ImGui::SliderFloat("Reflection Intensity", &reflInt, 0.0f, 20.0f);
-                    ImGui::SliderFloat("Reflection Exponent", &reflExp, 0.0f, 10.0f);
-                    ImGui::SliderFloat("Fade Distance", &fade, 0.0f, 2.0f);
-                }
-
-                // Ray Tracing
-                if (ImGui::CollapsingHeader("Ray Tracing", ImGuiTreeNodeFlags_DefaultOpen))
-                {
-                    static float rayInc = 1.6f, accept = 2.5f, jitter = 0.25f;
-                    ImGui::SliderFloat("Ray Increment", &rayInc, 0.1f, 5.0f);
-                    ImGui::SliderFloat("Acceptance Range", &accept, 0.1f, 8.0f);
-                    ImGui::SliderFloat("Ray Jitter Amount", &jitter, 0.0f, 1.0f);
-                }
-
-                // Filtering
-                if (ImGui::CollapsingHeader("Filtering and Details", ImGuiTreeNodeFlags_DefaultOpen))
-                {
-                    static float kernel = 1.0f, relief = 0.05f, scale = 0.35f;
-                    ImGui::SliderFloat("Filter Kernel Size", &kernel, 0.1f, 4.0f);
-                    ImGui::SliderFloat("Surface Relief Height", &relief, 0.0f, 0.5f);
-                    ImGui::SliderFloat("Surface Relief Scale", &scale, 0.0f, 2.0f);
-                }
-
-                ImGui::EndChild();
-
-                ImGui::SameLine();
-
-                // Preview Window
-                ImGui::BeginChild("PreviewWindow", ImVec2(0, 0), true, ImGuiWindowFlags_NoScrollbar);
-
-                ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "PREVIEW");
-
-                // Show either live color or playback texture
-                ID3D11ShaderResourceView* previewSRV = g_playbackColorSRV ? g_playbackColorSRV : g_colorSRV;
-
-                if (previewSRV)
-                {
-                    ImVec2 avail = ImGui::GetContentRegionAvail();
-                    float aspect = (float)g_width / (float)g_height;
-                    ImVec2 size = ImVec2(avail.x, avail.x / aspect);
-
-                    if (size.y > avail.y) {
-                        size = ImVec2(avail.y * aspect, avail.y);
-                    }
-
-                    ImGui::Image((ImTextureID)previewSRV, size);
-                }
-                else
-                {
-                    ImGui::TextDisabled("No preview available");
-                    ImGui::Text("Start recording or load a clip");
-                }
-
-                ImGui::EndChild();
-            }
-
-            // ====================== RECORDINGS TAB ======================
-            else if (currentTab == 0)
-            {
-                ImGui::Text("Recordings");
-                ImGui::Separator();
-
-                if (ImGui::Button("START RECORD RAW FRAMES", ImVec2(280, 36)))
+                if (ImGui::Button("START RECORD RAW FRAMES", ImVec2(280, 38)))
                     StartRecording();
-
-                ImGui::SameLine();
-                if (ImGui::Button("STOP RECORDING", ImVec2(200, 36)) && g_recording)
+            }
+            else
+            {
+                if (ImGui::Button("STOP RECORDING", ImVec2(280, 38)))
                     StopRecording();
 
-                if (g_recording)
-                {
-                    ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "● RECORDING: %d frames", g_recordedFrameCount);
-                }
+                ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "● RECORDING: %d frames", g_recordedFrameCount);
+                ImGui::Text("Folder: %s", g_recordDir.c_str());
+            }
 
-                ImGui::Spacing();
+            ImGui::Spacing();
 
-                if (ImGui::Button("PLAY LAST RECORDING", ImVec2(280, 32)))
+            // === PLAYBACK SECTION ===
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "PLAYBACK (with ReShade effects)");
+            ImGui::Separator();
+
+            if (!g_playback)
+            {
+                if (ImGui::Button("PLAY LAST RECORDING", ImVec2(280, 36)))
                     StartPlayback();
 
                 ImGui::SameLine();
-                if (ImGui::Button("LOAD RECORDING...", ImVec2(200, 32)))
+                if (ImGui::Button("LOAD RECORDING...", ImVec2(200, 36)))
                 {
                     char path[MAX_PATH] = {};
                     OPENFILENAMEA ofn{};
@@ -1345,79 +1205,51 @@ static void Render()
                     ofn.lpstrFile = path;
                     ofn.nMaxFile = MAX_PATH;
                     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
-                    if (GetOpenFileNameA(&ofn)) {
+                    if (GetOpenFileNameA(&ofn))
+                    {
                         std::string dir = std::filesystem::path(path).parent_path().string();
                         StartPlayback(dir);
                     }
                 }
-
-                if (g_playback)
-                {
-                    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1), "PLAYBACK: %d / %zu", g_playbackIndex, g_playbackFrames.size());
-                    ImGui::SliderFloat("Playback Speed", &g_playbackFPS, 5.0f, 120.0f, "%.0f fps");
-                    ImGui::Checkbox("Loop", &g_playbackLoop);
-                    if (ImGui::Button("STOP PLAYBACK", ImVec2(200, 28)))
-                        StopPlayback();
-                }
             }
-
-            // ====================== SETTINGS TAB ======================
-            else if (currentTab == 3)
+            else
             {
-                ImGui::TextDisabled("Overlay Settings");
-                ImGui::Separator();
-
-                if (ImGui::Checkbox("Show FPS Counter", &g_showFPS))
-                    SaveSettings();
-
-                if (ImGui::Button("Change FPS Color"))
-                    g_showFpsColorPicker = !g_showFpsColorPicker;
-
-                if (g_showFpsColorPicker)
-                {
-                    ImGui::ColorPicker4("FPS Color", g_fpsColor);
-                }
-
-                ImGui::Spacing();
-                char minLabel[128];
-                snprintf(minLabel, sizeof(minLabel), "Minimize Key: [%s]", VkKeyName(g_minimizeKey));
-                if (ImGui::Button(minLabel, ImVec2(280, 26)))
-                {
-                    g_waitKeyTarget = 1;
-                    g_waitKeyStart = GetTickCount();
-                }
-            }
-
-            // ====================== LOG TAB ======================
-            else if (currentTab == 4)
-            {
-                ImGui::Text("Log");
-                ImGui::Separator();
-                ImGui::TextDisabled("Debug output will appear here in future versions.");
-            }
-
-            // ====================== BOTTOM BAR ======================
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.18f, 0.75f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.25f, 0.9f, 1.0f));
-
-            if (ImGui::Button("Reload", ImVec2(90, 28))) {}
-            ImGui::SameLine();
-            if (ImGui::Button("Performance Mode", ImVec2(160, 28))) {}
-
-            ImGui::SameLine(ImGui::GetWindowWidth() - 280);
-
-            if (ImGui::Button("Render + export to MP4", ImVec2(260, 32)))
-            {
-                if (!g_playback && !g_recordDir.empty())
-                    StartPlayback();
-                else if (g_playback)
+                if (ImGui::Button("STOP PLAYBACK", ImVec2(200, 34)))
                     StopPlayback();
+
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1), "PLAYBACK: %d / %zu", g_playbackIndex, g_playbackFrames.size());
+                ImGui::SliderFloat("Playback FPS", &g_playbackFPS, 5.0f, 120.0f, "%.0f");
+                ImGui::Checkbox("Loop playback", &g_playbackLoop);
             }
 
-            ImGui::PopStyleColor(2);
+            ImGui::Spacing();
+            ImGui::Separator();
+
+            // === STATUS + OPTIONS ===
+            ImGui::Text("Status: %s", OverlayStatus(p));
+
+            if (ImGui::Checkbox("Show FPS", &g_showFPS))
+                SaveSettings();
+
+            // Keybind
+            char minLabel[128];
+            snprintf(minLabel, sizeof(minLabel),
+                g_waitKeyTarget == 1 ? "Minimize Key: [press...]" : "Minimize Key: [%s]",
+                VkKeyName(g_minimizeKey));
+
+            if (ImGui::Button(minLabel, ImVec2(260, 26)))
+            {
+                g_waitKeyTarget = 1;
+                g_waitKeyStart = GetTickCount();
+            }
+
+            if (g_waitKeyTarget)
+                ImGui::TextColored(ImVec4(1, 0.85f, 0.3f, 1), "Press any key (ESC to cancel)");
+
+            ImGui::Separator();
+
+            if (ImGui::Button("Exit Overlay", ImVec2(-1, 30)))
+                g_running = false;
         }
         ImGui::End();
     }
