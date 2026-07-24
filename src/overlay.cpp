@@ -1056,23 +1056,23 @@ static bool InitD3D()
     ImGui::StyleColorsDark();
     {
         ImGuiStyle& st = ImGui::GetStyle();
-        st.WindowRounding = 3.0f;
-        st.FrameRounding = 1.0f;
+        st.WindowRounding = 12.0f;
+        st.FrameRounding = 8.0f;
         st.WindowBorderSize = 1.0f;
         st.FrameBorderSize = 1.0f;
-        st.WindowPadding = ImVec2(8, 8);
-        st.ItemSpacing = ImVec2(7, 6);
+        st.WindowPadding = ImVec2(12, 12);
+        st.ItemSpacing = ImVec2(8, 8);
         ImVec4* c = st.Colors;
-        c[ImGuiCol_WindowBg] = ImVec4(0.006f, 0.008f, 0.011f, 0.84f);
-        c[ImGuiCol_TitleBg] = ImVec4(0.010f, 0.014f, 0.020f, 0.90f);
-        c[ImGuiCol_TitleBgActive] = ImVec4(0.018f, 0.026f, 0.036f, 0.94f);
-        c[ImGuiCol_Border] = ImVec4(0.16f, 0.20f, 0.24f, 0.70f);
-        c[ImGuiCol_FrameBg] = ImVec4(0.015f, 0.028f, 0.048f, 0.92f);
-        c[ImGuiCol_FrameBgHovered] = ImVec4(0.035f, 0.080f, 0.140f, 0.95f);
-        c[ImGuiCol_CheckMark] = ImVec4(0.92f, 0.90f, 0.65f, 1.0f);
-        c[ImGuiCol_Button] = ImVec4(0.025f, 0.025f, 0.030f, 0.88f);
-        c[ImGuiCol_ButtonHovered] = ImVec4(0.055f, 0.060f, 0.070f, 0.95f);
-        c[ImGuiCol_ButtonActive] = ImVec4(0.085f, 0.090f, 0.100f, 1.00f);
+        c[ImGuiCol_WindowBg] = ImVec4(0.039f, 0.039f, 0.071f, 0.92f);
+        c[ImGuiCol_TitleBg] = ImVec4(0.086f, 0.090f, 0.114f, 0.95f);
+        c[ImGuiCol_TitleBgActive] = ImVec4(0.106f, 0.114f, 0.149f, 0.97f);
+        c[ImGuiCol_Border] = ImVec4(0.137f, 0.141f, 0.169f, 0.6f);
+        c[ImGuiCol_FrameBg] = ImVec4(0.086f, 0.086f, 0.114f, 0.9f);
+        c[ImGuiCol_FrameBgHovered] = ImVec4(0.153f, 0.180f, 0.259f, 0.95f);
+        c[ImGuiCol_CheckMark] = ImVec4(0.31f, 0.553f, 1.0f, 1.0f);
+        c[ImGuiCol_Button] = ImVec4(0.086f, 0.086f, 0.114f, 0.95f);
+        c[ImGuiCol_ButtonHovered] = ImVec4(0.137f, 0.149f, 0.188f, 0.98f);
+        c[ImGuiCol_ButtonActive] = ImVec4(0.165f, 0.208f, 0.322f, 1.0f);
     }
     ImGui_ImplWin32_Init(g_hwnd);
     ImGui_ImplDX11_Init(g_dev, g_ctx);
