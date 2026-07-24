@@ -194,6 +194,9 @@ static float g_fps = 0.0f;
 static int   g_fpsFrames = 0;
 static DWORD g_fpsTick = 0;
 static std::string g_gpuName = "Unknown GPU";
+static bool     g_recording = false;
+static int      g_frameCount = 0;
+static char     g_recordPath[MAX_PATH] = {".\\frames\\"};
 static DWORD g_resyncDueTick = 0;
 
 static std::thread       g_pipeThread;
@@ -811,6 +814,25 @@ static void Render()
             ImGui::Separator();
             if (ImGui::Button("Exit Overlay", ImVec2(-1, 24)))
                 g_running = false;
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("VIDEO RECORDING");
+            ImGui::Separator();
+            if (ImGui::Button(g_recording ? "[STOP RECORDING]" : "[START RECORDING]", ImVec2(-1, 24)))
+            {
+                g_recording = !g_recording;
+                if (g_recording)
+                {
+                    g_frameCount = 0;
+                    CreateDirectoryA(g_recordPath, nullptr);
+                    Log("[Record] started to %s", g_recordPath);
+                }
+                else
+                {
+                    Log("[Record] stopped. Frames saved: %d", g_frameCount);
+                }
+            }
+            ImGui::Text("Frames: %d", g_frameCount);
         }
         ImGui::End();
     }
@@ -822,6 +844,19 @@ static void Render()
         ApplyWindowMode();
         if (!g_menu && !g_reshadeInput) FocusRoblox();
         lastMenuState = g_menu;
+    }
+
+    if (g_recording)
+    {
+        char framePath[MAX_PATH];
+        snprintf(framePath, sizeof(framePath), "%sframe_%05d.bmp", g_recordPath, g_frameCount++);
+        ID3D11Texture2D* bb = nullptr;
+        g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
+        if (bb)
+        {
+            SaveFrameBMP(framePath, g_ctx, bb, g_width, g_height);
+            bb->Release();
+        }
     }
 
     ImGui::Render();
@@ -1097,6 +1132,48 @@ static void Follow()
             r.left, r.top, r.right - r.left, r.bottom - r.top,
             (g_menu || g_reshadeInput) ? SWP_SHOWWINDOW : (SWP_SHOWWINDOW | SWP_NOACTIVATE));
     }
+}
+
+static bool SaveFrameBMP(const char* path, ID3D11DeviceContext* ctx, ID3D11Texture2D* src, int w, int h)
+{
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+    BITMAPFILEHEADER fh = { 'B' | ('M'<<8), 0, 0, 0, 54 + 3*w*h };
+    BITMAPINFOHEADER ih = { 40, w, -h, 1, 24, 0, 3*w*h, 0, 0, 0, 0 };
+    fwrite(&fh, 14, 1, f);
+    fwrite(&ih, 40, 1, f);
+    D3D11_TEXTURE2D_DESC td = {};
+    src->GetDesc(&td);
+    ID3D11Texture2D* stage = nullptr;
+    D3D11_TEXTURE2D_DESC sd = {};
+    sd.Width = w; sd.Height = h; sd.MipLevels = 1; sd.ArraySize = 1;
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count = 1;
+    sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (SUCCEEDED(g_dev->CreateTexture2D(&sd, nullptr, &stage)))
+    {
+        ctx->CopyResource(stage, src);
+        D3D11_MAPPED_SUBRESOURCE ms = {};
+        if (SUCCEEDED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &ms)))
+        {
+            char* row = new char[3*w];
+            for (int y = 0; y < h; ++y)
+            {
+                BYTE* srcRow = (BYTE*)ms.pData + y * ms.RowPitch;
+                for (int x = 0; x < w; ++x)
+                {
+                    row[3*x+0] = srcRow[4*x+2]; // B
+                    row[3*x+1] = srcRow[4*x+1]; // G
+                    row[3*x+2] = srcRow[4*x+0]; // R
+                }
+                fwrite(row, 1, 3*w, f);
+            }
+            delete[] row;
+            ctx->Unmap(stage, 0);
+        }
+        stage->Release();
+    }
+    fclose(f);
+    return true;
 }
 
 static void RequestOverlayResync(const char* reason, DWORD delayMs)
