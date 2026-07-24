@@ -5,13 +5,16 @@
 #define NOMINMAX
 #endif
 
+// === MUST BE FIRST ===
 #include <windows.h>
+#include <commdlg.h>           // File Open dialog (OPENFILENAMEA)
+#pragma comment(lib, "comdlg32.lib")
+
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
-#include <commdlg.h>   // For OPENFILENAMEA / GetOpenFileNameA (file dialog)
 #include <stdint.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -26,8 +29,6 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
-
-#pragma comment(lib, "comdlg32.lib")  // Link ComDlg32 for file dialog
 
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
@@ -1248,8 +1249,8 @@ static void Render()
                 if (ImGui::Button("LOAD RECORDING FOLDER...", ImVec2(-1, 22))) {
                     // Simple: open last or show message
                     char path[MAX_PATH] = {};
-                    OPENFILENAMEA ofn = {};
-                    ofn.lStructSize = sizeof(ofn);
+                    OPENFILENAMEA ofn{};
+                    ofn.lStructSize = sizeof(OPENFILENAMEA);
                     ofn.hwndOwner = g_hwnd;
                     ofn.lpstrFilter = "All Files\0*.*\0";
                     ofn.lpstrFile = path;
