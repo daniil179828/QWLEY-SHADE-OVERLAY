@@ -20,6 +20,11 @@
 #include <mutex>
 #include <atomic>
 #include <algorithm>
+#include <vector>
+#include <filesystem>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
 
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
@@ -195,6 +200,25 @@ static int   g_fpsFrames = 0;
 static DWORD g_fpsTick = 0;
 static std::string g_gpuName = "Unknown GPU";
 static DWORD g_resyncDueTick = 0;
+
+// ====================== RECORDING & PLAYBACK ======================
+static bool   g_recording = false;
+static bool   g_playback = false;
+static std::string g_recordDir;
+static int    g_recordFrameIndex = 0;
+static DWORD  g_recordStartTick = 0;
+static int    g_recordedFrameCount = 0;
+
+static std::vector<std::string> g_playbackFrames;
+static int    g_playbackIndex = 0;
+static DWORD  g_playbackLastTick = 0;
+static float  g_playbackFPS = 30.0f;
+static bool   g_playbackLoop = true;
+static ID3D11Texture2D* g_playbackColorTex = nullptr;
+static ID3D11ShaderResourceView* g_playbackColorSRV = nullptr;
+static std::string g_currentPlaybackDir;
+
+// ====================== END RECORD/PLAY ======================
 
 static std::thread       g_pipeThread;
 static std::mutex        g_pipeMutex;
@@ -499,6 +523,101 @@ static void PipeThread()
     }
 }
 
+// ====================== BMP SAVER ======================
+#pragma pack(push, 1)
+struct BMPHeader {
+    uint16_t bfType = 0x4D42;      // 'BM'
+    uint32_t bfSize = 0;
+    uint16_t bfReserved1 = 0;
+    uint16_t bfReserved2 = 0;
+    uint32_t bfOffBits = 54;
+    uint32_t biSize = 40;
+    int32_t  biWidth = 0;
+    int32_t  biHeight = 0;
+    uint16_t biPlanes = 1;
+    uint16_t biBitCount = 32;
+    uint32_t biCompression = 0;    // BI_RGB
+    uint32_t biSizeImage = 0;
+    int32_t  biXPelsPerMeter = 0;
+    int32_t  biYPelsPerMeter = 0;
+    uint32_t biClrUsed = 0;
+    uint32_t biClrImportant = 0;
+};
+#pragma pack(pop)
+
+static bool SaveTextureToBMP(ID3D11Texture2D* tex, const char* filepath)
+{
+    if (!tex || !g_ctx || !g_dev) return false;
+
+    D3D11_TEXTURE2D_DESC desc;
+    tex->GetDesc(&desc);
+
+    // Create staging texture
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.MiscFlags = 0;
+
+    ID3D11Texture2D* staging = nullptr;
+    if (FAILED(g_dev->CreateTexture2D(&stagingDesc, nullptr, &staging))) {
+        return false;
+    }
+
+    g_ctx->CopyResource(staging, tex);
+
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(g_ctx->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+        staging->Release();
+        return false;
+    }
+
+    int w = desc.Width;
+    int h = desc.Height;
+    int rowPitch = mapped.RowPitch;
+    uint8_t* srcData = (uint8_t*)mapped.pData;
+
+    // Create BMP file
+    FILE* f = fopen(filepath, "wb");
+    if (!f) {
+        g_ctx->Unmap(staging, 0);
+        staging->Release();
+        return false;
+    }
+
+    int rowSize = w * 4;
+    int padding = (4 - (rowSize % 4)) % 4;
+    int imageSize = (rowSize + padding) * h;
+
+    BMPHeader header;
+    header.bfSize = sizeof(BMPHeader) + imageSize;
+    header.biWidth = w;
+    header.biHeight = -h;  // top-down
+    header.biSizeImage = imageSize;
+
+    fwrite(&header, sizeof(BMPHeader), 1, f);
+
+    // Write pixels (BGRA -> BGRA, flip if needed)
+    std::vector<uint8_t> row(rowSize + padding, 0);
+    for (int y = 0; y < h; ++y) {
+        uint8_t* srcRow = srcData + y * rowPitch;
+        for (int x = 0; x < w; ++x) {
+            // BGRA order
+            row[x*4 + 0] = srcRow[x*4 + 0];
+            row[x*4 + 1] = srcRow[x*4 + 1];
+            row[x*4 + 2] = srcRow[x*4 + 2];
+            row[x*4 + 3] = 255; // force alpha
+        }
+        fwrite(row.data(), 1, rowSize + padding, f);
+    }
+
+    fclose(f);
+    g_ctx->Unmap(staging, 0);
+    staging->Release();
+    return true;
+}
+// ====================== END BMP SAVER ======================
+
 static const char* VS_SRC = R"HLSL(
 struct O { float4 p:SV_POSITION; float2 uv:TEXCOORD0; };
 O main(uint id:SV_VertexID){
@@ -652,6 +771,266 @@ static void UpdateResources(const PipePayload& p)
     }
 }
 
+// ====================== RECORDING FUNCTIONS ======================
+static std::string GetTimestamp()
+{
+    auto now = std::chrono::system_clock::now();
+    auto tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm;
+    localtime_s(&tm, &tt);
+    std::stringstream ss;
+    ss << std::put_time(&tm, "%Y%m%d_%H%M%S");
+    return ss.str();
+}
+
+static void StartRecording()
+{
+    if (g_recording) return;
+
+    std::string ts = GetTimestamp();
+    g_recordDir = "recordings\\clip_" + ts;
+    std::filesystem::create_directories(g_recordDir);
+
+    g_recordFrameIndex = 0;
+    g_recordedFrameCount = 0;
+    g_recordStartTick = GetTickCount();
+    g_recording = true;
+
+    Log("[Record] Started recording to: %s", g_recordDir.c_str());
+}
+
+static void StopRecording()
+{
+    if (!g_recording) return;
+    g_recording = false;
+    DWORD duration = GetTickCount() - g_recordStartTick;
+    float fps = g_recordedFrameCount > 0 ? (g_recordedFrameCount * 1000.0f / duration) : 0.0f;
+
+    // Save metadata
+    std::string metaPath = g_recordDir + "\\meta.txt";
+    FILE* mf = fopen(metaPath.c_str(), "w");
+    if (mf) {
+        fprintf(mf, "width=%u\nheight=%u\nframes=%d\nfps=%.2f\nduration_ms=%u\n",
+            g_width, g_height, g_recordedFrameCount, fps, duration);
+        fclose(mf);
+    }
+
+    Log("[Record] Stopped. Saved %d frames (%.1f fps) to %s", 
+        g_recordedFrameCount, fps, g_recordDir.c_str());
+}
+
+static void RecordCurrentFrame()
+{
+    if (!g_recording || !g_colorTex) return;
+
+    char framePath[512];
+    snprintf(framePath, sizeof(framePath), "%s\\frame_%05d.bmp", 
+             g_recordDir.c_str(), g_recordFrameIndex);
+
+    if (SaveTextureToBMP(g_colorTex, framePath)) {
+        g_recordFrameIndex++;
+        g_recordedFrameCount++;
+    }
+}
+// ====================== END RECORDING ======================
+
+// ====================== PLAYBACK FUNCTIONS ======================
+static void LoadPlaybackFrames(const std::string& dirPath)
+{
+    g_playbackFrames.clear();
+    g_playbackIndex = 0;
+    g_currentPlaybackDir = dirPath;
+
+    try {
+        for (const auto& entry : std::filesystem::directory_iterator(dirPath)) {
+            if (entry.is_regular_file()) {
+                std::string ext = entry.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext == ".bmp" || ext == ".png") {
+                    g_playbackFrames.push_back(entry.path().string());
+                }
+            }
+        }
+    } catch (...) {}
+
+    // Sort numerically
+    std::sort(g_playbackFrames.begin(), g_playbackFrames.end());
+
+    Log("[Playback] Loaded %zu frames from %s", g_playbackFrames.size(), dirPath.c_str());
+}
+
+static bool LoadPlaybackTexture(const std::string& filepath)
+{
+    SafeRelease(g_playbackColorSRV);
+    SafeRelease(g_playbackColorTex);
+
+    // Load BMP manually (simple loader)
+    FILE* f = fopen(filepath.c_str(), "rb");
+    if (!f) return false;
+
+    BMPHeader header;
+    if (fread(&header, sizeof(BMPHeader), 1, f) != 1 || header.bfType != 0x4D42) {
+        fclose(f);
+        return false;
+    }
+
+    int w = header.biWidth;
+    int h = abs(header.biHeight);
+    int bpp = header.biBitCount;
+
+    if (bpp != 32 && bpp != 24) {
+        fclose(f);
+        return false;
+    }
+
+    fseek(f, header.bfOffBits, SEEK_SET);
+
+    int rowSize = w * (bpp / 8);
+    int padding = (4 - (rowSize % 4)) % 4;
+    std::vector<uint8_t> pixels(w * h * 4);
+
+    for (int y = 0; y < h; ++y) {
+        int targetY = (header.biHeight > 0) ? (h - 1 - y) : y;
+        uint8_t* dst = &pixels[targetY * w * 4];
+
+        if (bpp == 32) {
+            fread(dst, 1, rowSize, f);
+            fseek(f, padding, SEEK_CUR);
+            for (int x = 0; x < w; ++x) {
+                // already BGRA
+            }
+        } else {
+            for (int x = 0; x < w; ++x) {
+                uint8_t bgr[3];
+                fread(bgr, 3, 1, f);
+                dst[x*4 + 0] = bgr[0];
+                dst[x*4 + 1] = bgr[1];
+                dst[x*4 + 2] = bgr[2];
+                dst[x*4 + 3] = 255;
+            }
+            fseek(f, padding, SEEK_CUR);
+        }
+    }
+    fclose(f);
+
+    // Create texture
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA init = {};
+    init.pSysMem = pixels.data();
+    init.SysMemPitch = w * 4;
+
+    if (FAILED(g_dev->CreateTexture2D(&td, &init, &g_playbackColorTex))) {
+        return false;
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    if (FAILED(g_dev->CreateShaderResourceView(g_playbackColorTex, &srvDesc, &g_playbackColorSRV))) {
+        SafeRelease(g_playbackColorTex);
+        return false;
+    }
+
+    return true;
+}
+
+static void StartPlayback(const std::string& dir = "")
+{
+    if (g_playback) return;
+
+    std::string targetDir = dir.empty() ? g_recordDir : dir;
+
+    if (targetDir.empty() || !std::filesystem::exists(targetDir)) {
+        // Try to find the most recent recording
+        try {
+            std::string latest;
+            auto lastWrite = std::filesystem::file_time_type::min();
+            for (const auto& entry : std::filesystem::directory_iterator("recordings")) {
+                if (entry.is_directory() && entry.path().filename().string().find("clip_") == 0) {
+                    auto ftime = std::filesystem::last_write_time(entry);
+                    if (ftime > lastWrite) {
+                        lastWrite = ftime;
+                        latest = entry.path().string();
+                    }
+                }
+            }
+            if (!latest.empty()) targetDir = latest;
+        } catch (...) {}
+    }
+
+    if (targetDir.empty() || !std::filesystem::exists(targetDir)) {
+        Log("[Playback] No recording found!");
+        return;
+    }
+
+    LoadPlaybackFrames(targetDir);
+
+    if (g_playbackFrames.empty()) {
+        Log("[Playback] No frames in directory!");
+        return;
+    }
+
+    g_playback = true;
+    g_playbackIndex = 0;
+    g_playbackLastTick = GetTickCount();
+
+    // Load first frame
+    if (!g_playbackFrames.empty()) {
+        LoadPlaybackTexture(g_playbackFrames[0]);
+    }
+
+    Log("[Playback] Started playback from %s (%zu frames)", targetDir.c_str(), g_playbackFrames.size());
+}
+
+static void StopPlayback()
+{
+    if (!g_playback) return;
+    g_playback = false;
+    SafeRelease(g_playbackColorSRV);
+    SafeRelease(g_playbackColorTex);
+    g_playbackFrames.clear();
+    Log("[Playback] Stopped");
+}
+
+static void UpdatePlayback()
+{
+    if (!g_playback || g_playbackFrames.empty()) return;
+
+    DWORD now = GetTickCount();
+    float frameTime = 1000.0f / g_playbackFPS;
+
+    if (now - g_playbackLastTick >= (DWORD)frameTime) {
+        g_playbackLastTick = now;
+        g_playbackIndex++;
+
+        if (g_playbackIndex >= (int)g_playbackFrames.size()) {
+            if (g_playbackLoop) {
+                g_playbackIndex = 0;
+            } else {
+                StopPlayback();
+                return;
+            }
+        }
+
+        // Load new frame
+        if (g_playbackIndex < (int)g_playbackFrames.size()) {
+            LoadPlaybackTexture(g_playbackFrames[g_playbackIndex]);
+        }
+    }
+}
+// ====================== END PLAYBACK ======================
+
 static void DrawTri()
 {
     g_ctx->IASetInputLayout(nullptr);
@@ -693,26 +1072,39 @@ static void Render()
     { std::lock_guard<std::mutex> lk(g_pipeMutex); p = g_payload; }
     UpdateResources(p);
 
+    // Update playback if active
+    if (g_playback) {
+        UpdatePlayback();
+    }
+
     float clear[4] = { 0,0,0, g_transparent ? 0.0f : 1.0f };
     g_ctx->ClearRenderTargetView(g_rtv, clear);
     ViewportFull();
 
-    // Color pass
-    if (g_colorSRV)
+    // ====================== COLOR PASS (with playback support) ======================
+    ID3D11ShaderResourceView* colorSRVToUse = nullptr;
+
+    if (g_playback && g_playbackColorSRV) {
+        colorSRVToUse = g_playbackColorSRV;
+    } else if (g_colorSRV) {
+        colorSRVToUse = g_colorSRV;
+    }
+
+    if (colorSRVToUse)
     {
         g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
         g_ctx->OMSetDepthStencilState(g_dsOff, 0);
         g_ctx->VSSetShader(g_vs, nullptr, 0);
         g_ctx->PSSetShader(g_psColor, nullptr, 0);
-        g_ctx->PSSetShaderResources(0, 1, &g_colorSRV);
+        g_ctx->PSSetShaderResources(0, 1, &colorSRVToUse);
         g_ctx->PSSetSamplers(0, 1, &g_samp);
         DrawTri();
         ID3D11ShaderResourceView* n = nullptr;
         g_ctx->PSSetShaderResources(0, 1, &n);
     }
 
-    // Depth pass
-    if (g_depthSRV && g_localDSV)
+    // ====================== DEPTH PASS ======================
+    if (g_depthSRV && g_localDSV && !g_playback)   // depth only for live
     {
         g_ctx->ClearDepthStencilView(g_localDSV, D3D11_CLEAR_DEPTH, 1.0f, 0);
         g_ctx->OMSetRenderTargets(1, &g_rtv, g_localDSV);
@@ -729,6 +1121,11 @@ static void Render()
         ViewportFull();
         ID3D11ShaderResourceView* n = nullptr;
         g_ctx->PSSetShaderResources(0, 1, &n);
+    }
+
+    // ====================== RECORDING ======================
+    if (g_recording && !g_playback) {
+        RecordCurrentFrame();
     }
 
     // ImGui
@@ -754,7 +1151,7 @@ static void Render()
     // Menu
     if (g_menu)
     {
-        ImGui::SetNextWindowSize(ImVec2(560, 280), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(620, 420), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowBgAlpha(0.78f);
         if (ImGui::Begin("\xE2\x96\xBE  Overlay Control", &g_menu,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse))
@@ -763,6 +1160,14 @@ static void Render()
             ImGui::Separator();
             ImGui::Text("GPU Device: %s", g_gpuName.c_str());
             ImGui::Text("Status: %s", OverlayStatus(p));
+
+            if (g_recording) {
+                ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "RECORDING: %d frames", g_recordedFrameCount);
+            }
+            if (g_playback) {
+                ImGui::TextColored(ImVec4(0.3f,1,0.5f,1), "PLAYBACK: frame %d/%zu (%.1f fps)", 
+                    g_playbackIndex, g_playbackFrames.size(), g_playbackFPS);
+            }
 
             ImGui::Spacing();
             ImGui::TextDisabled("OPTIONS");
@@ -807,6 +1212,55 @@ static void Render()
             if (g_waitKeyTarget)
                 ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.30f, 1.0f),
                     "Press any key. ESC = cancel.");
+
+            // ====================== RECORD / PLAYBACK UI ======================
+            ImGui::Spacing();
+            ImGui::TextDisabled("VIDEO RECORDING + POST-EFFECT (ReShade Style)");
+            ImGui::Separator();
+
+            if (g_recording) {
+                if (ImGui::Button("STOP RECORDING", ImVec2(-1, 28))) {
+                    StopRecording();
+                }
+                ImGui::Text("Recording to: %s", g_recordDir.c_str());
+                ImGui::Text("Frames: %d", g_recordedFrameCount);
+            } else {
+                if (ImGui::Button("START RECORD RAW FRAMES", ImVec2(-1, 28))) {
+                    StartRecording();
+                }
+            }
+
+            ImGui::Spacing();
+
+            if (g_playback) {
+                if (ImGui::Button("STOP PLAYBACK", ImVec2(-1, 26))) {
+                    StopPlayback();
+                }
+                ImGui::SliderFloat("Playback FPS", &g_playbackFPS, 5.0f, 120.0f, "%.0f");
+                ImGui::Checkbox("Loop", &g_playbackLoop);
+            } else {
+                if (ImGui::Button("PLAY LAST RECORDING", ImVec2(-1, 26))) {
+                    StartPlayback();
+                }
+                if (ImGui::Button("LOAD RECORDING FOLDER...", ImVec2(-1, 22))) {
+                    // Simple: open last or show message
+                    char path[MAX_PATH] = {};
+                    OPENFILENAMEA ofn = {};
+                    ofn.lStructSize = sizeof(ofn);
+                    ofn.hwndOwner = g_hwnd;
+                    ofn.lpstrFilter = "All Files\0*.*\0";
+                    ofn.lpstrFile = path;
+                    ofn.nMaxFile = MAX_PATH;
+                    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+                    if (GetOpenFileNameA(&ofn)) {
+                        std::string dir = std::filesystem::path(path).parent_path().string();
+                        StartPlayback(dir);
+                    }
+                }
+            }
+
+            ImGui::TextDisabled("Tip: Record raw Roblox -> Apply ReShade effect during playback");
+            // ====================== END RECORD/PLAYBACK UI ======================
 
             ImGui::Separator();
             if (ImGui::Button("Exit Overlay", ImVec2(-1, 24)))
@@ -1137,7 +1591,7 @@ static void Hotkeys()
     if (CaptureKeyIfWaiting())
         return;
 
-    static bool pMenu = false, pF8 = false, pF1 = false, pF11 = false;
+    static bool pMenu = false, pF8 = false, pF1 = false, pF11 = false, pF9 = false, pF10 = false;
 
     bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     bool tabDown = (GetAsyncKeyState(VK_TAB) & 0x8000) != 0;
@@ -1145,6 +1599,8 @@ static void Hotkeys()
     bool f8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
     bool minKeyDown = (GetAsyncKeyState(g_minimizeKey) & 0x8000) != 0;
     bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+    bool f9 = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+    bool f10 = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
 
     if (menuCombo && !pMenu && !g_reshadeInput)
         SetMenu(!g_menu);
@@ -1195,7 +1651,26 @@ static void Hotkeys()
     if (GetAsyncKeyState(VK_END) & 1)
         g_running = false;
 
-    pMenu = menuCombo; pF8 = f8; pF1 = minKeyDown; pF11 = f11;
+    // RECORDING HOTKEYS
+    if (f9 && !pF9)
+    {
+        if (g_recording) {
+            StopRecording();
+        } else {
+            StartRecording();
+        }
+    }
+
+    if (f10 && !pF10)
+    {
+        if (g_playback) {
+            StopPlayback();
+        } else {
+            StartPlayback();
+        }
+    }
+
+    pMenu = menuCombo; pF8 = f8; pF1 = minKeyDown; pF11 = f11; pF9 = f9; pF10 = f10;
 }
 
 
@@ -1231,8 +1706,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     Log("FeatureModule Overlay starting (menu=Shift+Tab, minimizeKey=%d=%s)",
         g_minimizeKey, VkKeyName(g_minimizeKey));
 
-    if (!InitWindow()) { Log("Window init failed"); return 1; }
-    if (!InitD3D()) { Log("D3D init failed");    return 2; }
+    if (!InitWindow()) { Log("[Window] init failed"); return 1; }
+    if (!InitD3D()) { Log("[D3D] init failed");    return 2; }
 
     g_pipeThread = std::thread(PipeThread);
 
@@ -1269,6 +1744,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
 
     SafeRelease(g_colorSRV);  SafeRelease(g_colorTex);
     SafeRelease(g_depthSRV);  SafeRelease(g_depthTex);
+    SafeRelease(g_playbackColorSRV); SafeRelease(g_playbackColorTex);
     SafeRelease(g_rtv);
     SafeRelease(g_localDSV);  SafeRelease(g_localDepth);
     SafeRelease(g_dsWrite);   SafeRelease(g_dsOff);
