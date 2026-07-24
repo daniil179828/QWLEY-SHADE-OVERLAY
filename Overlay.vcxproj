@@ -66,6 +66,9 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;dwmapi.lib;gdi32.lib;imm32.lib;user32.lib;kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /Y "$(ProjectDir)external\fonts\VarelaRound-Regular.ttf" "$(OutDir)VarelaRound-Regular.ttf"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -86,6 +89,9 @@
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;dwmapi.lib;gdi32.lib;imm32.lib;user32.lib;kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /Y "$(ProjectDir)external\fonts\VarelaRound-Regular.ttf" "$(OutDir)VarelaRound-Regular.ttf"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\overlay.cpp" />

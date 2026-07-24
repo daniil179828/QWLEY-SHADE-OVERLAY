@@ -205,6 +205,7 @@ static PipePayload       g_payload;
 
 static char g_iniPath[MAX_PATH] = {};   // overlay_settings.ini
 static char g_reshadeIniPath[MAX_PATH] = {};  // ReShade.ini
+static char g_exeDir[MAX_PATH] = {};    // directory of the .exe (with trailing backslash)
 
 static void SetMenu(bool v);
 static void RequestOverlayResync(const char* reason, DWORD delayMs);
@@ -270,6 +271,25 @@ static const char* VkKeyName(int vk)
         return name;
     snprintf(name, sizeof(name), "VK_%02X", vk & 0xff);
     return name;
+}
+
+// Small section header with a blue accent bar (used in the redesigned menu)
+static void SectionLabel(const char* label)
+{
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float barH = ImGui::GetTextLineHeight();
+    // accent bar
+    dl->AddRectFilled(ImVec2(pos.x, pos.y),
+        ImVec2(pos.x + 3.0f, pos.y + barH),
+        IM_COL32(64, 156, 255, 255), 1.5f);
+    ImGui::SetCursorScreenPos(ImVec2(pos.x + 12.0f, pos.y));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.50f, 0.82f, 1.0f, 1.0f));
+    ImGui::TextUnformatted(label);
+    ImGui::PopStyleColor();
+    // move below the label and draw a thin separator
+    ImGui::SetCursorScreenPos(ImVec2(pos.x, pos.y + barH + 4.0f));
+    ImGui::Separator();
 }
 
 static void WriteReShadeOverlayKey()
@@ -739,7 +759,7 @@ static void Render()
     // FPS overlay
     if (g_showFPS)
     {
-        ImGui::SetNextWindowBgAlpha(0.35f);
+        ImGui::SetNextWindowBgAlpha(0.55f);
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
         ImGui::Begin("##fps", nullptr,
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
@@ -754,31 +774,33 @@ static void Render()
     // Menu
     if (g_menu)
     {
-        ImGui::SetNextWindowSize(ImVec2(560, 280), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowBgAlpha(0.78f);
-        if (ImGui::Begin("\xE2\x96\xBE  Overlay Control", &g_menu,
-            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse))
+        ImGui::SetNextWindowSize(ImVec2(540, 470), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowBgAlpha(0.96f);
+        if (ImGui::Begin("QWLEY \xC2\xB7 Overlay Control", &g_menu,
+            ImGuiWindowFlags_NoCollapse))
         {
-            ImGui::TextDisabled("SYSTEM STATUS");
-            ImGui::Separator();
-            ImGui::Text("GPU Device: %s", g_gpuName.c_str());
+            // ---------------- SYSTEM STATUS ----------------
+            SectionLabel("SYSTEM STATUS");
+            ImGui::Text("GPU:    %s", g_gpuName.c_str());
             ImGui::Text("Status: %s", OverlayStatus(p));
 
+            // ---------------- DISPLAY ----------------
             ImGui::Spacing();
-            ImGui::TextDisabled("OPTIONS");
-            ImGui::Separator();
-
-            if (ImGui::Checkbox("Show FPS", &g_showFPS))
+            SectionLabel("DISPLAY");
+            if (ImGui::Checkbox("Show FPS counter", &g_showFPS))
                 SaveSettings();
 
-            if (ImGui::Button("FPS counter color", ImVec2(160, 22)))
+            float avail = ImGui::GetContentRegionAvail().x;
+            if (ImGui::Button("FPS counter color", ImVec2(avail - 36.0f, 26)))
                 g_showFpsColorPicker = !g_showFpsColorPicker;
             ImGui::SameLine();
-            ImGui::ColorButton("##fps_col",
+            if (ImGui::ColorButton("##fps_col",
                 ImVec4(g_fpsColor[0], g_fpsColor[1], g_fpsColor[2], g_fpsColor[3]),
-                ImGuiColorEditFlags_NoTooltip, ImVec2(22, 22));
+                ImGuiColorEditFlags_NoTooltip, ImVec2(26, 26)))
+                g_showFpsColorPicker = !g_showFpsColorPicker;
             if (g_showFpsColorPicker)
             {
+                ImGui::SetNextItemWidth(-1);
                 if (ImGui::ColorPicker4("##fps_picker", g_fpsColor,
                     ImGuiColorEditFlags_NoSidePreview |
                     ImGuiColorEditFlags_NoSmallPreview |
@@ -786,31 +808,41 @@ static void Render()
                     SaveSettings();
             }
 
+            // ---------------- KEYBINDS ----------------
             ImGui::Spacing();
-            ImGui::TextDisabled("KEYBINDS");
-            ImGui::Separator();
-
-            // Minimize / overlay toggle key
+            SectionLabel("KEYBINDS");
             char minLabel[128];
             snprintf(minLabel, sizeof(minLabel),
                 g_waitKeyTarget == 1
-                ? "Overlay On/Off Key: [press key...]"
-                : "Overlay On/Off Key: [%s]",
+                ? "Overlay On/Off Key:  [ press a key... ]"
+                : "Overlay On/Off Key:  [%s]",
                 VkKeyName(g_minimizeKey));
-            if (ImGui::Button(minLabel, ImVec2(-1, 22)))
+            if (ImGui::Button(minLabel, ImVec2(-1, 26)))
             {
                 g_waitKeyTarget = 1;
                 g_waitKeyStart = GetTickCount();
                 for (int i = 0; i < 256; ++i) GetAsyncKeyState(i);
             }
-
             if (g_waitKeyTarget)
-                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.30f, 1.0f),
-                    "Press any key. ESC = cancel.");
+                ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.35f, 1.0f),
+                    "Press any key now   -   ESC to cancel.");
 
+            // ---------------- HOTKEYS ----------------
+            ImGui::Spacing();
+            SectionLabel("HOTKEYS");
+            ImGui::TextDisabled("Shift+Tab  menu      F8  ReShade input");
+            ImGui::TextDisabled("%s  overlay on/off      F2  invert depth", VkKeyName(g_minimizeKey));
+            ImGui::TextDisabled("F11  fullscreen sync         END  exit");
+
+            // ---------------- EXIT ----------------
+            ImGui::Spacing();
             ImGui::Separator();
-            if (ImGui::Button("Exit Overlay", ImVec2(-1, 24)))
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.16f, 0.20f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.78f, 0.24f, 0.29f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.92f, 0.32f, 0.37f, 1.00f));
+            if (ImGui::Button("Exit Overlay", ImVec2(-1, 30)))
                 g_running = false;
+            ImGui::PopStyleColor(3);
         }
         ImGui::End();
     }
@@ -1053,26 +1085,82 @@ static bool InitD3D()
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+
+    // --- Custom rounded font (VarelaRound) loaded next to the .exe, with a safe fallback ---
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        char fontPath[MAX_PATH];
+        snprintf(fontPath, MAX_PATH, "%sVarelaRound-Regular.ttf", g_exeDir);
+        ImFont* f = io.Fonts->AddFontFromFileTTF(fontPath, 16.0f, nullptr,
+            io.Fonts->GetGlyphRangesDefault());
+        if (!f)
+        {
+            Log("[Font] '%s' not found - using built-in ImGui font", fontPath);
+            io.Fonts->AddFontDefault();
+        }
+        else
+        {
+            io.FontDefault = f;
+            Log("[Font] loaded %s", fontPath);
+        }
+        io.ConfigWindowsResizeFromEdges = true;
+    }
+
     ImGui::StyleColorsDark();
     {
         ImGuiStyle& st = ImGui::GetStyle();
-        st.WindowRounding = 3.0f;
-        st.FrameRounding = 1.0f;
+        // --- Rounding (a bit rounded, as requested) ---
+        st.WindowRounding = 12.0f;
+        st.ChildRounding = 8.0f;
+        st.FrameRounding = 6.0f;
+        st.GrabRounding = 6.0f;
+        st.PopupRounding = 8.0f;
+        st.ScrollbarRounding = 6.0f;
+        st.TabRounding = 6.0f;
         st.WindowBorderSize = 1.0f;
+        st.ChildBorderSize = 1.0f;
         st.FrameBorderSize = 1.0f;
-        st.WindowPadding = ImVec2(8, 8);
-        st.ItemSpacing = ImVec2(7, 6);
+        st.WindowPadding = ImVec2(14, 14);
+        st.FramePadding = ImVec2(10, 7);
+        st.ItemSpacing = ImVec2(10, 8);
+        st.ItemInnerSpacing = ImVec2(6, 6);
+        st.WindowMinSize = ImVec2(240, 120);
+
         ImVec4* c = st.Colors;
-        c[ImGuiCol_WindowBg] = ImVec4(0.006f, 0.008f, 0.011f, 0.84f);
-        c[ImGuiCol_TitleBg] = ImVec4(0.010f, 0.014f, 0.020f, 0.90f);
-        c[ImGuiCol_TitleBgActive] = ImVec4(0.018f, 0.026f, 0.036f, 0.94f);
-        c[ImGuiCol_Border] = ImVec4(0.16f, 0.20f, 0.24f, 0.70f);
-        c[ImGuiCol_FrameBg] = ImVec4(0.015f, 0.028f, 0.048f, 0.92f);
-        c[ImGuiCol_FrameBgHovered] = ImVec4(0.035f, 0.080f, 0.140f, 0.95f);
-        c[ImGuiCol_CheckMark] = ImVec4(0.92f, 0.90f, 0.65f, 1.0f);
-        c[ImGuiCol_Button] = ImVec4(0.025f, 0.025f, 0.030f, 0.88f);
-        c[ImGuiCol_ButtonHovered] = ImVec4(0.055f, 0.060f, 0.070f, 0.95f);
-        c[ImGuiCol_ButtonActive] = ImVec4(0.085f, 0.090f, 0.100f, 1.00f);
+        // --- Black & blue theme ---
+        c[ImGuiCol_WindowBg]         = ImVec4(0.035f, 0.045f, 0.075f, 0.94f);
+        c[ImGuiCol_ChildBg]          = ImVec4(0.060f, 0.090f, 0.150f, 0.55f);
+        c[ImGuiCol_PopupBg]          = ImVec4(0.050f, 0.070f, 0.120f, 0.97f);
+        c[ImGuiCol_TitleBg]          = ImVec4(0.055f, 0.110f, 0.240f, 1.00f);
+        c[ImGuiCol_TitleBgActive]    = ImVec4(0.100f, 0.200f, 0.420f, 1.00f);
+        c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.055f, 0.110f, 0.240f, 0.80f);
+        c[ImGuiCol_Border]           = ImVec4(0.180f, 0.300f, 0.550f, 0.55f);
+        c[ImGuiCol_BorderShadow]     = ImVec4(0.000f, 0.000f, 0.000f, 0.00f);
+        c[ImGuiCol_FrameBg]          = ImVec4(0.070f, 0.100f, 0.170f, 0.95f);
+        c[ImGuiCol_FrameBgHovered]   = ImVec4(0.120f, 0.200f, 0.360f, 1.00f);
+        c[ImGuiCol_FrameBgActive]    = ImVec4(0.150f, 0.260f, 0.460f, 1.00f);
+        c[ImGuiCol_Text]             = ImVec4(0.860f, 0.920f, 1.000f, 1.00f);
+        c[ImGuiCol_TextDisabled]     = ImVec4(0.450f, 0.550f, 0.720f, 1.00f);
+        c[ImGuiCol_CheckMark]        = ImVec4(0.350f, 0.780f, 1.000f, 1.00f);
+        c[ImGuiCol_SliderGrab]       = ImVec4(0.300f, 0.620f, 1.000f, 1.00f);
+        c[ImGuiCol_SliderGrabActive] = ImVec4(0.450f, 0.750f, 1.000f, 1.00f);
+        c[ImGuiCol_Button]           = ImVec4(0.100f, 0.260f, 0.520f, 0.95f);
+        c[ImGuiCol_ButtonHovered]    = ImVec4(0.200f, 0.420f, 0.780f, 1.00f);
+        c[ImGuiCol_ButtonActive]     = ImVec4(0.300f, 0.550f, 0.950f, 1.00f);
+        c[ImGuiCol_Header]           = ImVec4(0.120f, 0.260f, 0.500f, 0.55f);
+        c[ImGuiCol_HeaderHovered]    = ImVec4(0.160f, 0.340f, 0.620f, 0.80f);
+        c[ImGuiCol_HeaderActive]     = ImVec4(0.200f, 0.420f, 0.750f, 1.00f);
+        c[ImGuiCol_Separator]        = ImVec4(0.200f, 0.340f, 0.600f, 0.50f);
+        c[ImGuiCol_SeparatorHovered] = ImVec4(0.300f, 0.500f, 0.850f, 0.70f);
+        c[ImGuiCol_SeparatorActive]  = ImVec4(0.350f, 0.600f, 0.950f, 0.90f);
+        c[ImGuiCol_ResizeGrip]       = ImVec4(0.200f, 0.400f, 0.750f, 0.35f);
+        c[ImGuiCol_ResizeGripHovered]= ImVec4(0.300f, 0.550f, 0.950f, 0.60f);
+        c[ImGuiCol_ResizeGripActive] = ImVec4(0.350f, 0.650f, 1.000f, 0.80f);
+        c[ImGuiCol_ScrollbarBg]      = ImVec4(0.040f, 0.060f, 0.100f, 0.60f);
+        c[ImGuiCol_ScrollbarGrab]    = ImVec4(0.180f, 0.340f, 0.620f, 0.60f);
+        c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.240f, 0.440f, 0.780f, 0.80f);
+        c[ImGuiCol_ScrollbarGrabActive]   = ImVec4(0.300f, 0.550f, 0.950f, 1.00f);
+        c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.000f, 0.000f, 0.000f, 0.60f);
     }
     ImGui_ImplWin32_Init(g_hwnd);
     ImGui_ImplDX11_Init(g_dev, g_ctx);
@@ -1216,6 +1304,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         *(slash + 1) = '\0';
         snprintf(g_iniPath, MAX_PATH, "%soverlay_settings.ini", exe);
         snprintf(g_reshadeIniPath, MAX_PATH, "%sReShade.ini", exe);
+        strncpy(g_exeDir, exe, MAX_PATH - 1);
+        g_exeDir[MAX_PATH - 1] = '\0';
     }
 
     //Загружаем настройки
