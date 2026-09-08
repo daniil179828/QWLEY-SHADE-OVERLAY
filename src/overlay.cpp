@@ -5,7 +5,6 @@
 #define NOMINMAX
 #endif
 
-// === MUST BE FIRST ===
 #include <windows.h>
 #include <commdlg.h>
 #pragma comment(lib, "comdlg32.lib")
@@ -89,9 +88,6 @@ struct PipePayload
 template <typename T>
 static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
-// ---------------------------------------------------------------------------
-// Format helpers
-// ---------------------------------------------------------------------------
 static DXGI_FORMAT DepthSRVFormat(uint32_t fmt)
 {
     DXGI_FORMAT f = (DXGI_FORMAT)fmt;
@@ -159,9 +155,6 @@ static PipePayload NormalizePayload(const uint8_t raw[PAYLOAD_SIZE])
     return p;
 }
 
-// ---------------------------------------------------------------------------
-// Globals
-// ---------------------------------------------------------------------------
 static HWND   g_hwnd = nullptr;
 static HWND   g_target = nullptr;
 static DWORD  g_targetPid = 0;
@@ -179,13 +172,13 @@ static UINT   g_width = 1280, g_height = 720;
 static DWORD  g_lastFollow = 0;
 static RECT   g_lastRect = { 0,0,0,0 };
 
-// --- depth semantics (single source of truth, mirrored into ReShade.ini) ----
-static bool  g_depthReversed = true;   // Roblox = reversed-Z (near = 1, far = 0)
+
+static bool  g_depthReversed = true; 
 static bool  g_depthUpsideDown = false;
 static bool  g_depthLogarithmic = false;
 static float g_depthFarPlane = 1000.0f;
-static bool  g_depthPreview = false;   // F3: on-screen depth debug view
-static bool  g_useViewportRemap = true;// use vp* rect from payload
+static bool  g_depthPreview = false;
+static bool  g_useViewportRemap = true;
 static bool  g_depthPassEnabled = true;
 
 static ID3D11Device* g_dev = nullptr;
@@ -214,7 +207,7 @@ static uint32_t g_lastDepthW = 0, g_lastDepthH = 0, g_lastDepthFmt = 0;
 static uint32_t g_lastColorW = 0, g_lastColorH = 0, g_lastColorFmt = 0;
 static HRESULT  g_lastDepthOpenHR = S_OK, g_lastColorOpenHR = S_OK;
 static HRESULT  g_lastDepthSRVHR = S_OK, g_lastColorSRVHR = S_OK;
-static UINT     g_depthTexW = 0, g_depthTexH = 0;  // real opened texture size
+static UINT     g_depthTexW = 0, g_depthTexH = 0;  
 static UINT     g_colorTexW = 0, g_colorTexH = 0;
 static int      g_depthHeuristicDraws = 4;
 static bool     g_showFPS = true;
@@ -318,10 +311,7 @@ static const char* VkKeyName(int vk)
     return name;
 }
 
-// ===========================================================================
-//  Minimal order-preserving INI reader/writer (replaces the old broken
-//  string-splicing code that could duplicate the [INPUT] section).
-// ===========================================================================
+
 struct IniSection
 {
     std::string name;
@@ -404,8 +394,6 @@ static bool IniSave(const char* path, const std::vector<IniSection>& secs)
     return true;
 }
 
-// Merge a single RESHADE_* define into an existing comma separated list,
-// replacing any previous value instead of appending a duplicate.
 static void MergeDefine(std::vector<std::string>& defs, const std::string& key, const std::string& value)
 {
     for (auto& d : defs)
@@ -420,40 +408,21 @@ static void MergeDefine(std::vector<std::string>& defs, const std::string& key, 
     }
     defs.push_back(key + "=" + value);
 }
-
-// ===========================================================================
-//  ReShade.ini: depth-buffer configuration.
-//
-//  This is the part that actually decides whether SSR / MXAO / RTGI work.
-//  The old code only wrote KeyOverlay and never told ReShade how to interpret
-//  our depth buffer, so every depth-based effect (SSR first of all) silently
-//  produced garbage.
-// ===========================================================================
 static void WriteReShadeConfig()
 {
     if (!g_reshadeIniPath[0]) return;
 
     std::vector<IniSection> ini = IniLoad(g_reshadeIniPath);
 
-    // ---- overlay key (Home) -------------------------------------------------
     IniSet(ini, "INPUT", "KeyOverlay", "36,0,0,0");
 
-    // ---- generic depth add-on ----------------------------------------------
-    // DepthCopyBeforeClears MUST be 0: we fill the depth buffer once per frame
-    // and never clear it afterwards, so "as-is at end of frame" is correct.
-    // Any other value makes ReShade grab the buffer *before* our blit -> the
-    // depth it hands to SSR is an empty / one-frame-stale buffer.
     IniSet(ini, "DEPTH", "DepthCopyBeforeClears", "0");
     IniSet(ini, "DEPTH", "DepthCopyAtClearIndex", "0");
     IniSet(ini, "DEPTH", "DisableINTZ", "0");
-    // 2 = matching aspect ratio but relaxed (covers resolution scaling / DLSS,
-    // and the Roblox window-vs-render-target size mismatch).
     IniSet(ini, "DEPTH", "UseAspectRatioHeuristics", "2");
     IniSet(ini, "DEPTH", "DrawStatsHeuristic", "0");
 
-    // ---- preprocessor definitions ------------------------------------------
-    // Keep every user define, only force the four depth ones so that the
-    // shader-side interpretation can never disagree with what we upload.
+
     std::string cur = IniGet(ini, "GENERAL", "PreprocessorDefinitions", "");
     std::vector<std::string> defs;
     {
@@ -490,9 +459,7 @@ static void WriteReShadeConfig()
         Log("[ReShade] cannot write %s", g_reshadeIniPath);
 }
 
-// ===========================================================================
-//  Overlay settings
-// ===========================================================================
+
 static void LoadSettings()
 {
     if (!g_iniPath[0]) return;
@@ -573,9 +540,7 @@ static bool CaptureKeyIfWaiting()
     return true;
 }
 
-// ===========================================================================
-//  Pipe
-// ===========================================================================
+
 static bool ReadExact(HANDLE h, void* out, DWORD sz)
 {
     BYTE* p = (BYTE*)out; DWORD total = 0;
@@ -626,13 +591,7 @@ static void PipeThread()
     }
 }
 
-// ===========================================================================
-//  Shaders
-//
-//  cb0 layout (32 bytes):
-//    float4 gUV;    // xy = uv scale, zw = uv bias  (viewport remap)
-//    float4 gMisc;  // x = invert depth, y = far value, zw = unused
-// ===========================================================================
+
 struct RemapCB
 {
     float uvScale[2];
@@ -663,11 +622,6 @@ float4 main(float4 p:SV_POSITION, float2 uv:TEXCOORD0):SV_Target {
 }
 )HLSL";
 
-// Raw pass-through of the game depth. We deliberately do NOT normalise or
-// invert here: reversed-Z carries almost all of its precision near 1.0, and
-// converting it to "classic" 0..1 depth destroys the far-field precision that
-// SSR ray-marching depends on. ReShade is told about the convention through
-// RESHADE_DEPTH_INPUT_IS_REVERSED instead.
 static const char* PS_DEPTH = R"HLSL(
 cbuffer P : register(b0) { float4 gUV; float4 gMisc; };
 Texture2D<float> T:register(t0);
@@ -711,11 +665,6 @@ static bool Compile(const char* src, const char* target, ID3DBlob** out)
     return true;
 }
 
-// The buffer ReShade's generic-depth add-on will pick up.
-// Created as R32_TYPELESS + DEPTH_STENCIL|SHADER_RESOURCE, exactly the layout
-// a real game (and the INTZ path ReShade expects) produces. A plain
-// D32_FLOAT / depth-stencil-only texture is far more likely to be skipped or
-// mis-copied by the add-on.
 static bool CreateLocalDepth(UINT w, UINT h)
 {
     SafeRelease(g_localDepthSRV);
@@ -730,7 +679,7 @@ static bool CreateLocalDepth(UINT w, UINT h)
     d.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &g_localDepth)))
     {
-        // fall back to the plain format if the driver refuses the typeless one
+
         d.Format = DXGI_FORMAT_D32_FLOAT;
         d.BindFlags = D3D11_BIND_DEPTH_STENCIL;
         if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &g_localDepth)))
@@ -781,8 +730,6 @@ static bool OpenSharedTex(uint64_t handleValue, ID3D11Texture2D** out, HRESULT* 
     return SUCCEEDED(hr) && *out;
 }
 
-// Effective presentation size = the viewport rectangle if the layer reported
-// one, otherwise the full colour texture.
 static void EffectiveSize(const PipePayload& p, UINT& outW, UINT& outH)
 {
     if (g_useViewportRemap && (p.flags & FLAG_VIEWPORT_OK) && p.vpWidth && p.vpHeight)
@@ -851,20 +798,17 @@ static void UpdateResources(const PipePayload& p)
                 s.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
                 s.Texture2D.MipLevels = 1;
                 g_lastDepthSRVHR = g_dev->CreateShaderResourceView(g_depthTex, &s, &g_depthSRV);
-                Log("[Depth] tex %ux%u payloadFmt=%u texFmt=%u srvFmt=%u srvHR=0x%08lX",
+                Log("tex %ux%u payloadFmt=%u texFmt=%u srvFmt=%u srvHR=0x%08lX",
                     td.Width, td.Height, p.depthFormat, td.Format, s.Format,
                     (unsigned long)g_lastDepthSRVHR);
             }
-            else Log("[Depth] Open failed 0x%08lX", (unsigned long)g_lastDepthOpenHR);
+            else Log(" Open failed 0x%08lX", (unsigned long)g_lastDepthOpenHR);
             g_lastDepthHandle = p.depthHandle;
             g_lastDepthW = dw; g_lastDepthH = dh;
             g_lastDepthFmt = p.depthFormat;
         }
     }
 
-    // Swap chain follows the *viewport*, not the raw shared texture, so that
-    // colour and depth stay pixel-aligned and ReShade's aspect-ratio heuristic
-    // sees a depth buffer that matches the presentation size.
     if (ew && eh) Resize(ew, eh);
 }
 
@@ -885,7 +829,7 @@ static void SetRemap(UINT texW, UINT texH, const PipePayload& p, bool invert)
 
     if (g_depthUpsideDown && invert == false) { /* colour is never flipped */ }
 
-    cb.misc[0] = 0.0f;                 // shader-side invert: off (see PS_DEPTH note)
+    cb.misc[0] = 0.0f;                 
     cb.misc[1] = g_depthFarPlane;
     cb.misc[2] = 0.0f;
     cb.misc[3] = 0.0f;
@@ -944,10 +888,6 @@ static void Render(const PipePayload& p)
     g_ctx->ClearRenderTargetView(g_rtv, clear);
     ViewportFull();
 
-    // ================= DEPTH PASS =================
-    // Runs every frame, unconditionally. If the shared depth is missing we
-    // still clear to the far value, otherwise ReShade keeps consuming a frozen
-    // buffer from the last good frame (a classic "SSR smears / sticks" bug).
     const float farValue = g_depthReversed ? 0.0f : 1.0f;
 
     if (g_localDSV)
@@ -962,15 +902,10 @@ static void Render(const PipePayload& p)
             g_ctx->PSSetShader(g_psDepth, nullptr, 0);
             SetRemap(g_depthTexW, g_depthTexH, p, true);
             g_ctx->PSSetShaderResources(0, 1, &g_depthSRV);
-            // POINT sampling: linear filtering interpolates across depth
-            // discontinuities and invents surfaces that never existed, which
-            // is exactly what makes SSR produce halos and wrong hits.
+          
             g_ctx->PSSetSamplers(0, 1, &g_sampPoint);
             DrawTri();
 
-            // Draw-stat padding for ReShade's generic-depth heuristic.
-            // Depth writes are disabled here so these dummy draws can no
-            // longer corrupt the top-left pixel of the real depth buffer.
             if (g_depthHeuristicDraws > 0)
             {
                 g_ctx->OMSetDepthStencilState(g_dsOff, 0);
@@ -986,13 +921,12 @@ static void Render(const PipePayload& p)
         }
     }
 
-    // ================= COLOR PASS =================
+
     g_ctx->ClearRenderTargetView(g_rtv, clear);
 
     if (g_colorSRV || (g_depthPreview && g_depthSRV))
     {
-        // Keep the DSV bound (depth test/write off) so the big fullscreen draw
-        // is attributed to our depth buffer by ReShade's draw-call statistics.
+
         g_ctx->OMSetRenderTargets(1, &g_rtv, g_localDSV);
         g_ctx->OMSetDepthStencilState(g_dsOff, 0);
         g_ctx->VSSetShader(g_vs, nullptr, 0);
@@ -1016,7 +950,6 @@ static void Render(const PipePayload& p)
         g_ctx->PSSetShaderResources(0, 1, &n);
     }
 
-    // ================= ImGui =================
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -1102,16 +1035,11 @@ static void Render(const PipePayload& p)
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     }
 
-    // Leave the depth buffer BOUND at Present time. ReShade's generic-depth
-    // add-on looks at the depth-stencil that is current when the frame ends.
     g_ctx->OMSetRenderTargets(1, &g_rtv, g_localDSV);
 
     g_swap->Present(g_vsync ? 1 : 0, 0);
 }
 
-// ===========================================================================
-//  Window / target handling
-// ===========================================================================
 static HWND FindTarget()
 {
     HWND h = FindWindowA(nullptr, "Roblox");
@@ -1427,10 +1355,6 @@ static void ProcessOverlayResync()
     int nh = std::max<int>(1, (int)(r.bottom - r.top));
     SetWindowPos(g_hwnd, HWND_TOPMOST, r.left, r.top, nw, nh, SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
-    // Force the shared resources to be re-opened: after a fullscreen
-    // transition the layer recreates its shared textures and legacy shared
-    // handle values can be recycled, leaving us with an SRV that points at a
-    // destroyed texture (black depth -> dead SSR).
     SafeRelease(g_colorSRV); SafeRelease(g_colorTex);
     SafeRelease(g_depthSRV); SafeRelease(g_depthTex);
     g_lastColorHandle = g_lastDepthHandle = 0;
@@ -1503,8 +1427,7 @@ static void Hotkeys()
         RequestOverlayResync("F11 fullscreen transition", 1600);
     }
 
-    // F2 now flips the *documented* depth convention and syncs ReShade.ini,
-    // so the shader and ReShade can never disagree any more.
+ 
     if (GetAsyncKeyState(VK_F2) & 1)
     {
         g_depthReversed = !g_depthReversed;
@@ -1529,8 +1452,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     g_transparent = HasArg("/transparent");
     if (HasArg("/no-depth-heuristic")) g_depthHeuristicDraws = 0;
     if (HasArg("/no-vsync")) g_vsync = false;
-    // /low-perf no longer kills the depth pass (that silently disabled SSR);
-    // it only drops the heuristic padding draws.
     if (HasArg("/low-perf")) { g_lowPerf = true; g_depthHeuristicDraws = 0; }
     if (HasArg("/no-depth")) g_depthPassEnabled = false;
 
