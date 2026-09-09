@@ -39,7 +39,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "dwmapi.lib")
 
-#define PIPE_NAME_W     L"\\\\.\\pipe\\fuckoffmaxey"
+#define PIPE_NAME_W     L"\\\\.\\pipe\\qwleyshade"
 #define FLAG_COLOR_OK   (1u << 0)
 #define FLAG_DEPTH_OK   (1u << 1)
 #define FLAG_FPS_OK     (1u << 2)
