@@ -215,15 +215,12 @@ static float    g_fpsColor[4] = { 1.0f, 0.95f, 0.70f, 1.0f };
 static int  g_minimizeKey = VK_F1;
 
 static int  g_waitKeyTarget = 0;
-static char g_waitKeyMsg[96] = {};
 static DWORD g_waitKeyStart = 0;
 static float g_fps = 0.0f;
 static uint32_t g_prevFrameCount = 0;
 static std::string g_gpuName = "Unknown GPU";
 static DWORD g_resyncDueTick = 0;
-static volatile LONG g_resyncActive = 0;
-
-static bool  g_highFps = true;
+static bool  g_resyncing = false;
 
 static std::thread       g_pipeThread;
 static std::mutex        g_pipeMutex;
@@ -241,7 +238,6 @@ static void ApplyWindowMode();
 static void FocusRoblox();
 static void SaveSettings();
 static void WriteReShadeConfig();
-static void ViewportFull();
 
 static void Log(const char* fmt, ...)
 {
@@ -475,7 +471,6 @@ static void LoadSettings()
     if (v > 0 && v < 256) g_minimizeKey = v;
 
     g_showFPS = atoi(IniGet(ini, "Style", "ShowFPS", "1")) != 0;
-    g_highFps = atoi(IniGet(ini, "Style", "HighFps", "1")) != 0;
     {
         float r = 0, g = 0, b = 0, a = 0;
         if (sscanf(IniGet(ini, "Style", "FpsColor", ""), "%f,%f,%f,%f", &r, &g, &b, &a) == 4)
@@ -503,7 +498,6 @@ static void SaveSettings()
     std::vector<IniSection> ini;
     IniSet(ini, "Keybinds", "Minimize", std::to_string(g_minimizeKey));
     IniSet(ini, "Style", "ShowFPS", g_showFPS ? "1" : "0");
-    IniSet(ini, "Style", "HighFps", g_highFps ? "1" : "0");
     {
         char buf[128];
         snprintf(buf, sizeof(buf), "%.6f,%.6f,%.6f,%.6f",
@@ -538,19 +532,9 @@ static bool CaptureKeyIfWaiting()
             vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON ||
             vk == VK_XBUTTON1 || vk == VK_XBUTTON2)
             continue;
-        if (vk == VK_ESCAPE) { g_waitKeyTarget = 0; g_waitKeyMsg[0] = 0; return true; }
-        int c = vk & 0xff;
-        if (c == VK_F1 || c == VK_F2 || c == VK_F3 || c == VK_F8 ||
-            c == VK_F11 || c == VK_END)
-        {
-            snprintf(g_waitKeyMsg, sizeof(g_waitKeyMsg),
-                "This key is reserved, pick another");
-            return true;
-        }
-        int t = g_waitKeyTarget;
-        if (t == 1) { g_minimizeKey = vk; }
+        if (vk == VK_ESCAPE) { g_waitKeyTarget = 0; return true; }
+        if (g_waitKeyTarget == 1) g_minimizeKey = vk;
         g_waitKeyTarget = 0;
-        g_waitKeyMsg[0] = 0;
         SaveSettings();
         return true;
     }
@@ -659,6 +643,7 @@ float4 main(float4 p:SV_POSITION, float2 uv:TEXCOORD0):SV_Target {
     float2 c = uv * gUV.xy + gUV.zw;
     float d = T.SampleLevel(S, c, 0).r;
     if (gMisc.x > 0.5) d = 1.0 - d;
+    // linearise for a readable preview
     float f = max(gMisc.y, 1.0);
     float lin = 1.0 / (d * (1.0 - 1.0 / f) + (1.0 / f));
     lin = saturate(lin / f);
@@ -719,41 +704,42 @@ static bool CreateLocalDepth(UINT w, UINT h)
     return true;
 }
 
+static ID3D11RenderTargetView* CreateBackBufferRTV()
+{
+    ID3D11Texture2D* bb = nullptr;
+    if (FAILED(g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb)) || !bb)
+        return nullptr;
+    ID3D11RenderTargetView* rtv = nullptr;
+    g_dev->CreateRenderTargetView(bb, nullptr, &rtv);
+    bb->Release();
+    return rtv;
+}
+
 static bool Resize(UINT w, UINT h)
 {
     if (!w || !h) return false;
-    if ((int)w == (int)g_width && (int)h == (int)g_height) return true;
-    if (abs((int)w - (int)g_width) < 2 && abs((int)h - (int)g_height) < 2) return true;
+    if (w == g_width && h == g_height && g_rtv) return true;
 
     g_ctx->OMSetRenderTargets(0, nullptr, nullptr);
-
-    HRESULT hr = g_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
-    if (FAILED(hr))
-        hr = g_swap->ResizeBuffers(2, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, 0);
-
-    if (SUCCEEDED(hr))
-    {
-        g_width = w;
-        g_height = h;
-    }
-
-    SafeRelease(g_rtv);
     SafeRelease(g_localDepthSRV); SafeRelease(g_localDSV); SafeRelease(g_localDepth);
 
-    ID3D11Texture2D* bb = nullptr;
-    if (SUCCEEDED(g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb)) && bb)
+    if (w != g_width || h != g_height)
     {
-        g_dev->CreateRenderTargetView(bb, nullptr, &g_rtv);
-        bb->Release();
+        SafeRelease(g_rtv);
+        HRESULT hr = g_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+        if (FAILED(hr))
+        {
+            Log("[D3D] ResizeBuffers(%ux%u) failed 0x%08lX; retrying next frame",
+                w, h, (unsigned long)hr);
+            if (!g_rtv) g_rtv = CreateBackBufferRTV();
+            CreateLocalDepth(g_width, g_height);
+            return false;
+        }
+        g_width = w; g_height = h;
     }
-    CreateLocalDepth(g_width, g_height);
-    ViewportFull();
 
-    if (FAILED(hr))
-    {
-        Log("[D3D] ResizeBuffers failed 0x%08lX, keeping %ux%u", (unsigned long)hr, g_width, g_height);
-        return false;
-    }
+    if (!g_rtv) g_rtv = CreateBackBufferRTV();
+    CreateLocalDepth(g_width, g_height);
     Log("[D3D] resized to %ux%u", w, h);
     return true;
 }
@@ -767,8 +753,23 @@ static bool OpenSharedTex(uint64_t handleValue, ID3D11Texture2D** out, HRESULT* 
     return SUCCEEDED(hr) && *out;
 }
 
+static void EffectiveSize(const PipePayload& p, UINT& outW, UINT& outH)
+{
+    if (g_useViewportRemap && (p.flags & FLAG_VIEWPORT_OK) && p.vpWidth && p.vpHeight)
+    {
+        outW = p.vpWidth;
+        outH = p.vpHeight;
+        return;
+    }
+    outW = p.colorWidth ? p.colorWidth : p.depthWidth;
+    outH = p.colorHeight ? p.colorHeight : p.depthHeight;
+}
+
 static void UpdateResources(const PipePayload& p)
 {
+    UINT ew = 0, eh = 0;
+    EffectiveSize(p, ew, eh);
+
     if (p.colorHandle && p.colorWidth && p.colorHeight)
     {
         bool ch = p.colorHandle != g_lastColorHandle ||
@@ -830,6 +831,8 @@ static void UpdateResources(const PipePayload& p)
             g_lastDepthFmt = p.depthFormat;
         }
     }
+
+    if (ew && eh) Resize(ew, eh);
 }
 
 static void SetRemap(UINT texW, UINT texH, const PipePayload& p, bool invert)
@@ -847,7 +850,7 @@ static void SetRemap(UINT texW, UINT texH, const PipePayload& p, bool invert)
         cb.uvBias[1] = (float)p.vpY / (float)texH;
     }
 
-    if (g_depthUpsideDown && invert == false) { }
+    if (g_depthUpsideDown && invert == false) { /* colour is never flipped */ }
 
     cb.misc[0] = 0.0f;                 
     cb.misc[1] = g_depthFarPlane;
@@ -904,23 +907,17 @@ static void Render(const PipePayload& p)
 {
     UpdateResources(p);
 
-    if (!g_rtv)
-    {
-        g_swap->Present(g_vsync ? 1 : 0, 0);
-        return;
-    }
-
     float clear[4] = { 0,0,0, g_transparent ? 0.0f : 1.0f };
     g_ctx->ClearRenderTargetView(g_rtv, clear);
     ViewportFull();
 
     const float farValue = g_depthReversed ? 0.0f : 1.0f;
 
-    if (g_localDSV)
+    if (g_localDSV && g_depthPreview)
     {
         g_ctx->ClearDepthStencilView(g_localDSV, D3D11_CLEAR_DEPTH, farValue, 0);
 
-        if (g_depthPassEnabled && !g_highFps && g_depthSRV)
+        if (g_depthPassEnabled && g_depthSRV)
         {
             g_ctx->OMSetRenderTargets(1, &g_rtv, g_localDSV);
             g_ctx->OMSetDepthStencilState(g_dsWrite, 0);
@@ -947,12 +944,8 @@ static void Render(const PipePayload& p)
         }
     }
 
-
-    g_ctx->ClearRenderTargetView(g_rtv, clear);
-
     if (g_colorSRV || (g_depthPreview && g_depthSRV))
     {
-
         g_ctx->OMSetRenderTargets(1, &g_rtv, g_localDSV);
         g_ctx->OMSetDepthStencilState(g_dsOff, 0);
         g_ctx->VSSetShader(g_vs, nullptr, 0);
@@ -962,7 +955,7 @@ static void Render(const PipePayload& p)
             g_ctx->PSSetShader(g_psDepthView, nullptr, 0);
             SetRemap(g_depthTexW, g_depthTexH, p, true);
             g_ctx->PSSetShaderResources(0, 1, &g_depthSRV);
-            g_ctx->PSSetSamplers(0, 1, &g_sampPoint);
+            g_ctx->PSSetSamplers(0, 1, &g_sampLinear);
         }
         else
         {
@@ -998,16 +991,17 @@ static void Render(const PipePayload& p)
     {
         ImGui::SetNextWindowSize(ImVec2(400, 0), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowBgAlpha(0.95f);
+
         if (ImGui::Begin("Overlay Control", &g_menu,
             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
         {
-            ImGui::TextColored(ImVec4(0.72f, 0.72f, 0.74f, 1.0f), "SYSTEM STATUS");
+            ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.50f, 1.0f), "SYSTEM STATUS");
             ImGui::Separator();
             ImGui::Text("GPU Device: %s", g_gpuName.c_str());
             ImGui::Text("Status: %s", OverlayStatus(p));
 
             ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.72f, 0.72f, 0.74f, 1.0f), "OPTIONS");
+            ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.50f, 1.0f), "OPTIONS");
             ImGui::Separator();
 
             ImGui::Checkbox("Depth preview (F3)", &g_depthPreview);
@@ -1021,27 +1015,24 @@ static void Render(const PipePayload& p)
             ImGui::PopItemWidth();
 
             ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.72f, 0.72f, 0.74f, 1.0f), "KEYBINDS");
+            ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.50f, 1.0f), "KEYBINDS");
             ImGui::Separator();
 
             char minLabel[128];
             snprintf(minLabel, sizeof(minLabel),
                 g_waitKeyTarget == 1 ? "Overlay On/Off Key: [press...]" : "Overlay On/Off Key: [%s]",
                 VkKeyName(g_minimizeKey));
-            if (ImGui::Button(minLabel, ImVec2(-1, 22)))
+            if (ImGui::Button(minLabel, ImVec2(-1, 28)))
             {
                 g_waitKeyTarget = 1;
                 g_waitKeyStart = GetTickCount();
             }
             if (g_waitKeyTarget)
-                ImGui::TextColored(g_waitKeyMsg[0]
-                    ? ImVec4(0.90f, 0.55f, 0.45f, 1)
-                    : ImVec4(0.83f, 0.83f, 0.83f, 1),
-                    "%s", g_waitKeyMsg[0] ? g_waitKeyMsg : "Press any key (ESC to cancel)");
+                ImGui::TextColored(ImVec4(0.83f, 0.83f, 0.83f, 1), "Press any key (ESC to cancel)");
 
             ImGui::Spacing();
             ImGui::Separator();
-            if (ImGui::Button("Exit Overlay", ImVec2(-1, 24)))
+            if (ImGui::Button("Exit Overlay", ImVec2(-1, 30)))
                 g_running = false;
         }
         ImGui::End();
@@ -1090,23 +1081,8 @@ static RECT TargetRect()
 
 static void FocusRoblox()
 {
-    if (!g_target || !IsWindow(g_target)) return;
-    HWND fg = GetForegroundWindow();
-    DWORD ourTid = fg ? GetWindowThreadProcessId(fg, nullptr) : GetCurrentThreadId();
-    if (fg == g_target) return;
-    DWORD tgTid = GetWindowThreadProcessId(g_target, nullptr);
-    if (tgTid && tgTid != ourTid)
-    {
-        AttachThreadInput(ourTid, tgTid, TRUE);
-        BringWindowToTop(g_target);
+    if (g_target && IsWindow(g_target))
         SetForegroundWindow(g_target);
-        Sleep(5);
-        AttachThreadInput(ourTid, tgTid, FALSE);
-    }
-    else
-    {
-        SetForegroundWindow(g_target);
-    }
 }
 
 static bool ForegroundIsRobloxOrOverlay()
@@ -1133,9 +1109,9 @@ static bool ForegroundIsRobloxOrOverlay()
 static void UpdateForegroundVisibility()
 {
     if (g_desktop || !g_hwnd) return;
-    if (InterlockedCompareExchange(&g_resyncActive, 0, 0)) return;
 
-    bool shouldShow = g_overlayEnabled && ForegroundIsRobloxOrOverlay();
+    bool shouldShow = g_overlayEnabled && !g_resyncing &&
+        ForegroundIsRobloxOrOverlay();
     if (!shouldShow)
     {
         if (!g_overlayHiddenForForeground)
@@ -1147,7 +1123,7 @@ static void UpdateForegroundVisibility()
         }
         return;
     }
-    if (g_overlayHiddenForForeground)
+    if (g_overlayHiddenForForeground || !IsWindowVisible(g_hwnd))
     {
         ShowWindow(g_hwnd, SW_SHOWNA);
         g_overlayHiddenForForeground = false;
@@ -1194,7 +1170,8 @@ static void SendKeyToRoblox(WORD vk, bool forceSend = false)
     if (!g_target || !IsWindow(g_target)) return;
     ShowWindow(g_target, SW_SHOW);
     SetForegroundWindow(g_target);
-    Sleep(10);
+    for (int i = 0; i < 6 && GetForegroundWindow() != g_target; ++i)
+        Sleep(5);
     if (forceSend || GetForegroundWindow() != g_target)
     {
         INPUT in[2] = {};
@@ -1305,42 +1282,52 @@ static bool InitD3D()
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr;
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f,
-        nullptr, io.Fonts->GetGlyphRangesCyrillic());
-
     ImGui::StyleColorsDark();
     {
         ImGuiStyle& st = ImGui::GetStyle();
         st.WindowRounding = 8.0f;
-        st.ChildRounding = 8.0f;
-        st.FrameRounding = 4.0f;
+        st.FrameRounding = 6.0f;
         st.GrabRounding = 4.0f;
-        st.PopupRounding = 8.0f;
         st.WindowBorderSize = 1.0f;
         st.FrameBorderSize = 0.0f;
-        st.WindowPadding = ImVec2(12, 12);
-        st.FramePadding = ImVec2(8, 3);
-        st.ItemSpacing = ImVec2(8, 6);
+        st.WindowPadding = ImVec2(14, 14);
+        st.ItemSpacing = ImVec2(10, 8);
+        st.ScrollbarSize = 6.0f;
+        st.ScrollbarRounding = 3.0f;
         ImVec4* c = st.Colors;
-        c[ImGuiCol_Text]            = ImVec4(0.96f, 0.96f, 0.96f, 1.00f);
-        c[ImGuiCol_TextDisabled]    = ImVec4(0.62f, 0.62f, 0.62f, 1.00f);
-        c[ImGuiCol_Button]          = ImVec4(0.55f, 0.55f, 0.55f, 0.50f);
-        c[ImGuiCol_ButtonHovered]   = ImVec4(0.78f, 0.78f, 0.78f, 0.75f);
-        c[ImGuiCol_ButtonActive]    = ImVec4(0.92f, 0.92f, 0.92f, 0.95f);
-        c[ImGuiCol_CheckMark]       = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-        c[ImGuiCol_SliderGrab]      = ImVec4(0.85f, 0.85f, 0.85f, 1.00f);
-        c[ImGuiCol_SliderGrabActive]= ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-        c[ImGuiCol_FrameBgHovered]  = ImVec4(0.30f, 0.30f, 0.30f, 0.70f);
-        c[ImGuiCol_FrameBgActive]   = ImVec4(0.42f, 0.42f, 0.42f, 0.80f);
-        c[ImGuiCol_Header]          = ImVec4(0.50f, 0.50f, 0.50f, 0.35f);
-        c[ImGuiCol_HeaderHovered]   = ImVec4(0.62f, 0.62f, 0.62f, 0.50f);
-        c[ImGuiCol_HeaderActive]    = ImVec4(0.75f, 0.75f, 0.75f, 0.65f);
-        c[ImGuiCol_TextSelectedBg]  = ImVec4(0.60f, 0.60f, 0.60f, 0.35f);
-        c[ImGuiCol_NavHighlight]    = ImVec4(1.00f, 1.00f, 1.00f, 0.00f);
+        c[ImGuiCol_WindowBg] = ImVec4(0.055f, 0.055f, 0.055f, 0.94f);
+        c[ImGuiCol_ChildBg] = ImVec4(0.065f, 0.065f, 0.065f, 1.0f);
+        c[ImGuiCol_PopupBg] = ImVec4(0.07f, 0.07f, 0.07f, 0.96f);
+        c[ImGuiCol_Border] = ImVec4(0.14f, 0.14f, 0.14f, 0.60f);
+        c[ImGuiCol_FrameBg] = ImVec4(0.08f, 0.08f, 0.08f, 1.0f);
+        c[ImGuiCol_FrameBgHovered] = ImVec4(0.11f, 0.11f, 0.11f, 1.0f);
+        c[ImGuiCol_FrameBgActive] = ImVec4(0.14f, 0.14f, 0.14f, 1.0f);
+        c[ImGuiCol_TitleBg] = ImVec4(0.055f, 0.055f, 0.055f, 1.0f);
+        c[ImGuiCol_TitleBgActive] = ImVec4(0.07f, 0.07f, 0.07f, 1.0f);
+        c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.055f, 0.055f, 0.055f, 0.75f);
+        c[ImGuiCol_MenuBarBg] = ImVec4(0.08f, 0.08f, 0.08f, 1.0f);
+        c[ImGuiCol_ScrollbarBg] = ImVec4(0.055f, 0.055f, 0.055f, 0.60f);
+        c[ImGuiCol_ScrollbarGrab] = ImVec4(0.20f, 0.20f, 0.20f, 1.0f);
+        c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.28f, 0.28f, 0.28f, 1.0f);
+        c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.35f, 0.35f, 0.35f, 1.0f);
+        c[ImGuiCol_CheckMark] = ImVec4(0.83f, 0.83f, 0.83f, 1.0f);
+        c[ImGuiCol_SliderGrab] = ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
+        c[ImGuiCol_SliderGrabActive] = ImVec4(0.75f, 0.75f, 0.75f, 1.0f);
+        c[ImGuiCol_Button] = ImVec4(0.10f, 0.10f, 0.10f, 1.0f);
+        c[ImGuiCol_ButtonHovered] = ImVec4(0.15f, 0.15f, 0.15f, 1.0f);
+        c[ImGuiCol_ButtonActive] = ImVec4(0.20f, 0.20f, 0.20f, 1.0f);
+        c[ImGuiCol_Header] = ImVec4(0.10f, 0.10f, 0.10f, 1.0f);
+        c[ImGuiCol_HeaderHovered] = ImVec4(0.14f, 0.14f, 0.14f, 1.0f);
+        c[ImGuiCol_HeaderActive] = ImVec4(0.18f, 0.18f, 0.18f, 1.0f);
+        c[ImGuiCol_Separator] = ImVec4(0.14f, 0.14f, 0.14f, 0.50f);
+        c[ImGuiCol_SeparatorHovered] = ImVec4(0.30f, 0.30f, 0.30f, 0.50f);
+        c[ImGuiCol_SeparatorActive] = ImVec4(0.40f, 0.40f, 0.40f, 0.50f);
+        c[ImGuiCol_ResizeGrip] = ImVec4(0.20f, 0.20f, 0.20f, 0.20f);
+        c[ImGuiCol_ResizeGripHovered] = ImVec4(0.35f, 0.35f, 0.35f, 0.40f);
+        c[ImGuiCol_ResizeGripActive] = ImVec4(0.50f, 0.50f, 0.50f, 0.40f);
+        c[ImGuiCol_Text] = ImVec4(0.83f, 0.83f, 0.83f, 1.0f);
+        c[ImGuiCol_TextDisabled] = ImVec4(0.40f, 0.40f, 0.40f, 1.0f);
     }
-
     ImGui_ImplWin32_Init(g_hwnd);
     ImGui_ImplDX11_Init(g_dev, g_ctx);
     return true;
@@ -1350,8 +1337,7 @@ static void Follow()
 {
     if (g_desktop) return;
     UpdateForegroundVisibility();
-    if (!g_overlayEnabled || g_overlayHiddenForForeground) return;
-    if (InterlockedCompareExchange(&g_resyncActive, 0, 0)) return;
+    if (!g_overlayEnabled || g_overlayHiddenForForeground || g_resyncing) return;
     DWORD now = GetTickCount();
     if (now - g_lastFollow < 50) return;
     g_lastFollow = now;
@@ -1363,17 +1349,15 @@ static void Follow()
         SetWindowPos(g_hwnd, HWND_TOPMOST,
             r.left, r.top, r.right - r.left, r.bottom - r.top,
             (g_menu || g_reshadeInput) ? SWP_SHOWWINDOW : (SWP_SHOWWINDOW | SWP_NOACTIVATE));
-        Resize((UINT)std::max<LONG>(1, r.right - r.left),
-            (UINT)std::max<LONG>(1, r.bottom - r.top));
     }
 }
 
 static void RequestOverlayResync(const char* reason, DWORD delayMs)
 {
     Log("[Resync] requested: %s", reason ? reason : "manual");
-    InterlockedExchange(&g_resyncActive, 1);
     g_menu = false;
     g_reshadeInput = false;
+    g_resyncing = true;
     ApplyWindowMode();
     if (g_hwnd) ShowWindow(g_hwnd, SW_HIDE);
     g_lastRect = { 0,0,0,0 };
@@ -1392,7 +1376,6 @@ static void ProcessOverlayResync()
     int nw = std::max<int>(1, (int)(r.right - r.left));
     int nh = std::max<int>(1, (int)(r.bottom - r.top));
     SetWindowPos(g_hwnd, HWND_TOPMOST, r.left, r.top, nw, nh, SWP_SHOWWINDOW | SWP_NOACTIVATE);
-    Resize((UINT)nw, (UINT)nh);
 
     SafeRelease(g_colorSRV); SafeRelease(g_colorTex);
     SafeRelease(g_depthSRV); SafeRelease(g_depthTex);
@@ -1401,12 +1384,12 @@ static void ProcessOverlayResync()
     g_colorTexW = g_colorTexH = g_depthTexW = g_depthTexH = 0;
 
     ApplyWindowMode();
+    g_resyncing = false;
     if (g_overlayEnabled && ForegroundIsRobloxOrOverlay())
     {
         ShowWindow(g_hwnd, SW_SHOWNA);
         g_overlayHiddenForForeground = false;
     }
-    InterlockedExchange(&g_resyncActive, 0);
     Log("[Resync] applied: %dx%d at %ld,%ld", nw, nh, r.left, r.top);
 }
 
@@ -1439,6 +1422,7 @@ static void Hotkeys()
         g_overlayEnabled = !g_overlayEnabled;
         g_menu = false;
         g_reshadeInput = false;
+        g_resyncing = false;
         if (!g_overlayEnabled)
         {
             ShowWindow(g_hwnd, SW_HIDE);
@@ -1457,7 +1441,7 @@ static void Hotkeys()
         }
     }
 
-    if (f11 && !pF11 && !InterlockedCompareExchange(&g_resyncActive, 0, 0))
+    if (f11 && !pF11)
     {
         g_menu = false;
         g_reshadeInput = false;
@@ -1534,8 +1518,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         Hotkeys();
         Follow();
         ProcessOverlayResync();
-        if (g_overlayEnabled && !g_overlayHiddenForForeground &&
-            !InterlockedCompareExchange(&g_resyncActive, 0, 0))
+        if (g_overlayEnabled && !g_overlayHiddenForForeground && !g_resyncing)
         {
             PipePayload fp;
             { std::lock_guard<std::mutex> lk(g_pipeMutex); fp = g_payload; }
