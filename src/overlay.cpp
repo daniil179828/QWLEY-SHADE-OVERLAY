@@ -197,6 +197,21 @@ static ID3D11VertexShader* g_vs = nullptr;
 static ID3D11PixelShader* g_psDepth = nullptr;
 static ID3D11PixelShader* g_psColor = nullptr;
 static ID3D11PixelShader* g_psDepthView = nullptr;
+static ID3D11Texture2D* g_glassCapture = nullptr;
+static ID3D11ShaderResourceView* g_glassCaptureSRV = nullptr;
+static ID3D11Texture2D* g_glassBlurA = nullptr;
+static ID3D11ShaderResourceView* g_glassBlurASRV = nullptr;
+static ID3D11RenderTargetView* g_glassBlurARTV = nullptr;
+static ID3D11Texture2D* g_glassBlurB = nullptr;
+static ID3D11ShaderResourceView* g_glassBlurBSRV = nullptr;
+static ID3D11RenderTargetView* g_glassBlurBRTV = nullptr;
+static ID3D11PixelShader* g_psGlassBlur = nullptr;
+static ID3D11Buffer* g_glassCB = nullptr;
+static UINT g_glassW = 0, g_glassH = 0;
+static bool g_glassReady = false;
+static ImVec2 g_menuGlassPos, g_menuGlassSize;
+static ImVec2 g_fpsGlassPos, g_fpsGlassSize;
+static bool g_haveMenuGlassRect = false, g_haveFpsGlassRect = false;
 
 static ID3D11Texture2D* g_depthTex = nullptr;
 static ID3D11ShaderResourceView* g_depthSRV = nullptr;
@@ -217,7 +232,8 @@ static int  g_minimizeKey = VK_F1;
 static int  g_waitKeyTarget = 0;
 static DWORD g_waitKeyStart = 0;
 static float g_fps = 0.0f;
-static uint32_t g_prevFrameCount = 0;
+static bool  g_robloxFpsAvailable = false;
+static std::atomic<uint64_t> g_sourcePacketSerial{ 0 };
 static std::string g_gpuName = "Unknown GPU";
 static DWORD g_resyncDueTick = 0;
 static bool  g_resyncing = false;
@@ -225,9 +241,10 @@ static bool  g_resyncing = false;
 static std::thread       g_pipeThread;
 static std::mutex        g_pipeMutex;
 static std::atomic<bool> g_pipeStop{ false };
-static std::atomic<bool> g_pipeConnected{ false };
-static std::atomic<bool> g_hasPayload{ false };
-static PipePayload       g_payload;
+static std::atomic<bool>  g_pipeConnected{ false };
+static std::atomic<bool>  g_hasPayload{ false };
+static std::atomic<DWORD> g_lastPayloadTick{ 0 };
+static PipePayload        g_payload;
 
 static char g_iniPath[MAX_PATH] = {};
 static char g_reshadeIniPath[MAX_PATH] = {};
@@ -269,25 +286,58 @@ static void QueryGpuNameFromDevice()
     dxgiDevice->Release();
 }
 
-static void UpdateFPS(uint32_t currentFrameCount)
+static void UpdateRobloxFPS()
 {
-    static auto s_lastTime = std::chrono::high_resolution_clock::now();
+    using Clock = std::chrono::steady_clock;
+    static bool s_started = false;
+    static uint64_t s_windowStartPacket = 0;
+    static auto s_windowStartTime = Clock::now();
     static float s_smoothedFPS = 0.0f;
 
-    auto now = std::chrono::high_resolution_clock::now();
-    float dt = std::chrono::duration<float>(now - s_lastTime).count();
-    s_lastTime = now;
-
-    if (currentFrameCount != g_prevFrameCount)
+    const DWORD packetTick = g_lastPayloadTick.load(std::memory_order_acquire);
+    const DWORD nowTick = GetTickCount();
+    const bool validSource = g_pipeConnected.load(std::memory_order_acquire) &&
+        g_hasPayload.load(std::memory_order_acquire) && packetTick &&
+        nowTick - packetTick <= 750;
+    if (!validSource)
     {
-        g_prevFrameCount = currentFrameCount;
-        if (dt > 0.0001f && dt < 1.0f)
-        {
-            float instantFPS = 1.0f / dt;
-            if (s_smoothedFPS <= 0.0f) s_smoothedFPS = instantFPS;
-            else                       s_smoothedFPS = s_smoothedFPS * 0.95f + instantFPS * 0.05f;
-            g_fps = s_smoothedFPS;
-        }
+        s_started = false;
+        s_smoothedFPS = 0.0f;
+        g_fps = 0.0f;
+        g_robloxFpsAvailable = false;
+        return;
+    }
+
+    const uint64_t packetSerial = g_sourcePacketSerial.load(std::memory_order_acquire);
+    const auto now = Clock::now();
+    if (!s_started)
+    {
+        s_started = true;
+        s_windowStartPacket = packetSerial;
+        s_windowStartTime = now;
+        g_robloxFpsAvailable = false;
+        return;
+    }
+
+    const float elapsed = std::chrono::duration<float>(now - s_windowStartTime).count();
+    if (elapsed < 0.05f) return;
+
+    const uint64_t frameDelta = packetSerial - s_windowStartPacket;
+    s_windowStartPacket = packetSerial;
+    s_windowStartTime = now;
+
+    if (frameDelta < 10000ull && elapsed < 2.0f)
+    {
+        const float measured = (float)frameDelta / elapsed;
+        if (s_smoothedFPS <= 0.0f) s_smoothedFPS = measured;
+        else s_smoothedFPS = s_smoothedFPS * 0.05f + measured * 0.95f;
+        g_fps = s_smoothedFPS;
+        g_robloxFpsAvailable = true;
+    }
+    else
+    {
+        s_smoothedFPS = 0.0f;
+        g_robloxFpsAvailable = false;
     }
 }
 
@@ -422,8 +472,6 @@ static void WriteReShadeConfig()
     IniSet(ini, "DEPTH", "DisableINTZ", "0");
     IniSet(ini, "DEPTH", "UseAspectRatioHeuristics", "2");
     IniSet(ini, "DEPTH", "DrawStatsHeuristic", "0");
-
-
     std::string cur = IniGet(ini, "GENERAL", "PreprocessorDefinitions", "");
     std::vector<std::string> defs;
     {
@@ -459,8 +507,6 @@ static void WriteReShadeConfig()
     else
         Log("[ReShade] cannot write %s", g_reshadeIniPath);
 }
-
-
 static void LoadSettings()
 {
     if (!g_iniPath[0]) return;
@@ -578,14 +624,21 @@ static void PipeThread()
             uint8_t raw[PAYLOAD_SIZE] = {};
             if (!ReadExact(h, raw, sizeof(raw))) break;
             PipePayload p = NormalizePayload(raw);
-            if (p.depthHandle || p.colorHandle)
+            g_sourcePacketSerial.fetch_add(1, std::memory_order_release);
             {
                 std::lock_guard<std::mutex> lk(g_pipeMutex);
                 g_payload = p;
-                g_hasPayload.store(true);
             }
+            g_lastPayloadTick.store(GetTickCount(), std::memory_order_release);
+            g_hasPayload.store(true, std::memory_order_release);
         }
         CloseHandle(h);
+        {
+            std::lock_guard<std::mutex> lk(g_pipeMutex);
+            g_payload = PipePayload{};
+        }
+        g_lastPayloadTick.store(0, std::memory_order_release);
+        g_hasPayload.store(false, std::memory_order_release);
         g_pipeConnected.store(false);
         Log("[Pipe] disconnected");
         Sleep(300);
@@ -648,6 +701,33 @@ float4 main(float4 p:SV_POSITION, float2 uv:TEXCOORD0):SV_Target {
     float lin = 1.0 / (d * (1.0 - 1.0 / f) + (1.0 / f));
     lin = saturate(lin / f);
     return float4(lin, lin, lin, 1);
+}
+)HLSL";
+
+static const char* PS_GLASS_BLUR = R"HLSL(
+cbuffer GlassParams : register(b0) {
+    float2 texel;
+    float2 direction;
+    float time;
+    float distortion;
+    float2 padding;
+};
+Texture2D<float4> T : register(t0);
+SamplerState S : register(s0);
+float4 main(float4 p:SV_POSITION, float2 uv:TEXCOORD0):SV_Target {
+    // Two slow waves refract the already blurred backdrop. Distortion is enabled
+    // only on the final pass, keeping the result soft rather than wobbly/noisy.
+    float2 wave = float2(
+        sin(uv.y * 31.0 + time * 0.72) + sin(uv.y * 67.0 - time * 0.38),
+        cos(uv.x * 29.0 - time * 0.61) + sin(uv.x * 61.0 + time * 0.33));
+    uv += wave * texel * distortion * 0.5;
+    float2 d = texel * direction;
+    float4 c = T.SampleLevel(S, uv, 0) * 0.2270270270;
+    c += T.SampleLevel(S, uv + d * 1.3846153846, 0) * 0.3162162162;
+    c += T.SampleLevel(S, uv - d * 1.3846153846, 0) * 0.3162162162;
+    c += T.SampleLevel(S, uv + d * 3.2307692308, 0) * 0.0702702703;
+    c += T.SampleLevel(S, uv - d * 3.2307692308, 0) * 0.0702702703;
+    return c;
 }
 )HLSL";
 
@@ -739,7 +819,8 @@ static bool Resize(UINT w, UINT h)
     }
 
     if (!g_rtv) g_rtv = CreateBackBufferRTV();
-    CreateLocalDepth(g_width, g_height);
+    if (g_depthPassEnabled)
+        CreateLocalDepth(g_width, g_height);
     Log("[D3D] resized to %ux%u", w, h);
     return true;
 }
@@ -765,12 +846,68 @@ static void EffectiveSize(const PipePayload& p, UINT& outW, UINT& outH)
     outH = p.colorHeight ? p.colorHeight : p.depthHeight;
 }
 
+static void ReleaseDepthInput()
+{
+    if (!g_depthSRV && !g_depthTex && !g_lastDepthHandle) return;
+    ID3D11ShaderResourceView* nullSRV = nullptr;
+    g_ctx->PSSetShaderResources(0, 1, &nullSRV);
+    SafeRelease(g_depthSRV);
+    SafeRelease(g_depthTex);
+    g_depthTexW = g_depthTexH = 0;
+    g_lastDepthHandle = 0;
+    g_lastDepthW = g_lastDepthH = g_lastDepthFmt = 0;
+}
+
+static void ReleaseColorInput()
+{
+    if (!g_colorSRV && !g_colorTex && !g_lastColorHandle) return;
+    ID3D11ShaderResourceView* nullSRV = nullptr;
+    g_ctx->PSSetShaderResources(0, 1, &nullSRV);
+    SafeRelease(g_colorSRV);
+    SafeRelease(g_colorTex);
+    g_colorTexW = g_colorTexH = 0;
+    g_lastColorHandle = 0;
+    g_lastColorW = g_lastColorH = g_lastColorFmt = 0;
+}
+
+static bool IsDepthFresh(const PipePayload& p)
+{
+    static uint32_t lastFrame = 0;
+    static DWORD lastAdvanceTick = 0;
+    const DWORD now = GetTickCount();
+    const DWORD packetTick = g_lastPayloadTick.load(std::memory_order_acquire);
+
+    if (!g_pipeConnected.load(std::memory_order_acquire) ||
+        !g_hasPayload.load(std::memory_order_acquire) ||
+        !packetTick || now - packetTick > 750 ||
+        !(p.flags & FLAG_DEPTH_OK) || !p.depthHandle)
+    {
+        lastAdvanceTick = 0;
+        lastFrame = p.frameCount;
+        return false;
+    }
+    if (p.flags & FLAG_FPS_OK)
+    {
+        if (!lastAdvanceTick || p.frameCount != lastFrame)
+        {
+            lastFrame = p.frameCount;
+            lastAdvanceTick = now;
+        }
+        else if (now - lastAdvanceTick > 750)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void UpdateResources(const PipePayload& p)
 {
     UINT ew = 0, eh = 0;
     EffectiveSize(p, ew, eh);
 
-    if (p.colorHandle && p.colorWidth && p.colorHeight)
+    const bool colorValid = p.colorHandle && p.colorWidth && p.colorHeight;
+    if (colorValid)
     {
         bool ch = p.colorHandle != g_lastColorHandle ||
             p.colorWidth != g_lastColorW ||
@@ -799,8 +936,14 @@ static void UpdateResources(const PipePayload& p)
             g_lastColorFmt = p.colorFormat;
         }
     }
+    else
+    {
+        ReleaseColorInput();
+    }
 
-    if (p.depthHandle && (p.depthWidth || p.colorWidth) && (p.depthHeight || p.colorHeight))
+    const bool depthValid = IsDepthFresh(p) &&
+        (p.depthWidth || p.colorWidth) && (p.depthHeight || p.colorHeight);
+    if (depthValid)
     {
         uint32_t dw = p.depthWidth ? p.depthWidth : p.colorWidth;
         uint32_t dh = p.depthHeight ? p.depthHeight : p.colorHeight;
@@ -831,8 +974,12 @@ static void UpdateResources(const PipePayload& p)
             g_lastDepthFmt = p.depthFormat;
         }
     }
-
-    if (ew && eh) Resize(ew, eh);
+    else
+    {
+        ReleaseDepthInput();
+    }
+    (void)ew;
+    (void)eh;
 }
 
 static void SetRemap(UINT texW, UINT texH, const PipePayload& p, bool invert)
@@ -850,7 +997,11 @@ static void SetRemap(UINT texW, UINT texH, const PipePayload& p, bool invert)
         cb.uvBias[1] = (float)p.vpY / (float)texH;
     }
 
-    if (g_depthUpsideDown && invert == false) { /* colour is never flipped */ }
+    if (invert && g_depthUpsideDown)
+    {
+        cb.uvBias[1] += cb.uvScale[1];
+        cb.uvScale[1] = -cb.uvScale[1];
+    }
 
     cb.misc[0] = 0.0f;                 
     cb.misc[1] = g_depthFarPlane;
@@ -883,13 +1034,139 @@ static void ViewportFull()
     g_ctx->RSSetViewports(1, &v);
 }
 
+struct GlassCB
+{
+    float texel[2];
+    float direction[2];
+    float time;
+    float distortion;
+    float padding[2];
+};
+static_assert(sizeof(GlassCB) == 32, "GlassCB size");
+
+static void ReleaseGlassTextures()
+{
+    SafeRelease(g_glassCaptureSRV); SafeRelease(g_glassCapture);
+    SafeRelease(g_glassBlurASRV); SafeRelease(g_glassBlurARTV); SafeRelease(g_glassBlurA);
+    SafeRelease(g_glassBlurBSRV); SafeRelease(g_glassBlurBRTV); SafeRelease(g_glassBlurB);
+    g_glassW = g_glassH = 0;
+    g_glassReady = false;
+}
+
+static bool EnsureGlassTextures()
+{
+    if (!g_dev || !g_width || !g_height) return false;
+    if (g_glassCapture && g_glassW == g_width && g_glassH == g_height) return true;
+    ReleaseGlassTextures();
+
+    D3D11_TEXTURE2D_DESC d = {};
+    d.Width = g_width; d.Height = g_height;
+    d.MipLevels = 1; d.ArraySize = 1;
+    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_DEFAULT;
+    d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &g_glassCapture)) ||
+        FAILED(g_dev->CreateShaderResourceView(g_glassCapture, nullptr, &g_glassCaptureSRV)))
+    { ReleaseGlassTextures(); return false; }
+
+    d.Width = (g_width + 1) / 2;
+    d.Height = (g_height + 1) / 2;
+    d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &g_glassBlurA)) ||
+        FAILED(g_dev->CreateShaderResourceView(g_glassBlurA, nullptr, &g_glassBlurASRV)) ||
+        FAILED(g_dev->CreateRenderTargetView(g_glassBlurA, nullptr, &g_glassBlurARTV)) ||
+        FAILED(g_dev->CreateTexture2D(&d, nullptr, &g_glassBlurB)) ||
+        FAILED(g_dev->CreateShaderResourceView(g_glassBlurB, nullptr, &g_glassBlurBSRV)) ||
+        FAILED(g_dev->CreateRenderTargetView(g_glassBlurB, nullptr, &g_glassBlurBRTV)))
+    { ReleaseGlassTextures(); return false; }
+
+    g_glassW = g_width; g_glassH = g_height;
+    return true;
+}
+
+static void GlassBlurPass(ID3D11ShaderResourceView* source,
+    ID3D11RenderTargetView* target, float texelX, float texelY,
+    float dirX, float dirY, float distortion = 0.0f)
+{
+    GlassCB cb = {};
+    cb.texel[0] = texelX; cb.texel[1] = texelY;
+    cb.direction[0] = dirX; cb.direction[1] = dirY;
+    cb.time = (float)GetTickCount64() * 0.001f;
+    cb.distortion = distortion;
+    D3D11_MAPPED_SUBRESOURCE map = {};
+    if (SUCCEEDED(g_ctx->Map(g_glassCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &map)))
+    { memcpy(map.pData, &cb, sizeof(cb)); g_ctx->Unmap(g_glassCB, 0); }
+
+    g_ctx->OMSetRenderTargets(1, &target, nullptr);
+    g_ctx->OMSetDepthStencilState(g_dsOff, 0);
+    g_ctx->VSSetShader(g_vs, nullptr, 0);
+    g_ctx->PSSetShader(g_psGlassBlur, nullptr, 0);
+    g_ctx->PSSetConstantBuffers(0, 1, &g_glassCB);
+    g_ctx->PSSetShaderResources(0, 1, &source);
+    g_ctx->PSSetSamplers(0, 1, &g_sampLinear);
+    DrawTri();
+    ID3D11ShaderResourceView* nullSRV = nullptr;
+    g_ctx->PSSetShaderResources(0, 1, &nullSRV);
+}
+
+static void UpdateLiquidGlassTexture()
+{
+    g_glassReady = false;
+    if (!g_psGlassBlur || !g_glassCB || !EnsureGlassTextures()) return;
+
+    ID3D11Texture2D* backBuffer = nullptr;
+    if (FAILED(g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuffer)) || !backBuffer)
+        return;
+    g_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    g_ctx->CopyResource(g_glassCapture, backBuffer);
+    backBuffer->Release();
+
+    D3D11_VIEWPORT half = {};
+    half.Width = (float)((g_width + 1) / 2);
+    half.Height = (float)((g_height + 1) / 2);
+    half.MinDepth = 0.0f; half.MaxDepth = 1.0f;
+    g_ctx->RSSetViewports(1, &half);
+
+    GlassBlurPass(g_glassCaptureSRV, g_glassBlurARTV,
+        1.0f / (float)g_width, 1.0f / (float)g_height, 1.0f, 0.0f);
+    GlassBlurPass(g_glassBlurASRV, g_glassBlurBRTV,
+        2.0f / (float)g_width, 2.0f / (float)g_height, 0.0f, 1.0f);
+    GlassBlurPass(g_glassBlurBSRV, g_glassBlurARTV,
+        2.0f / (float)g_width, 2.0f / (float)g_height, 1.0f, 0.0f);
+    GlassBlurPass(g_glassBlurASRV, g_glassBlurBRTV,
+        2.0f / (float)g_width, 2.0f / (float)g_height, 0.0f, 1.0f, 5.5f);
+
+    ViewportFull();
+    g_ctx->OMSetRenderTargets(1, &g_rtv, g_localDSV);
+    g_glassReady = true;
+}
+
+static void DrawLiquidGlassBehind(const ImVec2& pos, const ImVec2& size, float rounding)
+{
+    if (!g_glassReady || !g_glassBlurBSRV || size.x <= 1.0f || size.y <= 1.0f) return;
+    ImVec2 end(pos.x + size.x, pos.y + size.y);
+    ImVec2 uv0(pos.x / (float)g_width, pos.y / (float)g_height);
+    ImVec2 uv1(end.x / (float)g_width, end.y / (float)g_height);
+    uv0.x = std::clamp(uv0.x, 0.0f, 1.0f); uv0.y = std::clamp(uv0.y, 0.0f, 1.0f);
+    uv1.x = std::clamp(uv1.x, 0.0f, 1.0f); uv1.y = std::clamp(uv1.y, 0.0f, 1.0f);
+
+    ImDrawList* bg = ImGui::GetBackgroundDrawList();
+    bg->AddImageRounded((ImTextureID)g_glassBlurBSRV, pos, end, uv0, uv1,
+        IM_COL32(255, 255, 255, 255), rounding);
+    bg->AddRectFilled(pos, end, IM_COL32(20, 17, 22, 122), rounding);
+    bg->AddRect(pos, end, IM_COL32(255, 255, 255, 30), rounding, 0, 1.0f);
+    bg->AddLine(ImVec2(pos.x + rounding, pos.y + 1.0f),
+        ImVec2(end.x - rounding, pos.y + 1.0f), IM_COL32(210, 176, 255, 42), 1.0f);
+}
+
 static const char* OverlayStatus(const PipePayload& p)
 {
     static char text[192];
     if (!g_pipeConnected.load())   return "Searching pipe";
     if (!g_hasPayload.load())      return "Pipe connected, waiting payload";
     bool colorReady = g_colorSRV && p.colorHandle;
-    bool depthReady = g_depthSRV && p.depthHandle;
+    bool depthReady = g_depthSRV && p.depthHandle && (p.flags & FLAG_DEPTH_OK);
     if (colorReady && depthReady)  return "Connected: color + depth";
     if (colorReady)                return "Connected: color only";
     if (depthReady)                return "Connected: depth only";
@@ -906,6 +1183,8 @@ static const char* OverlayStatus(const PipePayload& p)
 static void Render(const PipePayload& p)
 {
     UpdateResources(p);
+    if (g_depthPassEnabled && !g_localDSV)
+        CreateLocalDepth(g_width, g_height);
 
     float clear[4] = { 0,0,0, g_transparent ? 0.0f : 1.0f };
     g_ctx->ClearRenderTargetView(g_rtv, clear);
@@ -913,11 +1192,11 @@ static void Render(const PipePayload& p)
 
     const float farValue = g_depthReversed ? 0.0f : 1.0f;
 
-    if (g_localDSV && g_depthPreview)
+    if (g_depthPassEnabled && g_localDSV)
     {
         g_ctx->ClearDepthStencilView(g_localDSV, D3D11_CLEAR_DEPTH, farValue, 0);
 
-        if (g_depthPassEnabled && g_depthSRV)
+        if (g_depthSRV)
         {
             g_ctx->OMSetRenderTargets(1, &g_rtv, g_localDSV);
             g_ctx->OMSetDepthStencilState(g_dsWrite, 0);
@@ -969,32 +1248,46 @@ static void Render(const PipePayload& p)
         g_ctx->PSSetShaderResources(0, 1, &n);
     }
 
+    if (g_menu || g_showFPS) UpdateLiquidGlassTexture();
+
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
+    if (g_showFPS && g_haveFpsGlassRect)
+        DrawLiquidGlassBehind(g_fpsGlassPos, g_fpsGlassSize, 8.0f);
+    if (g_menu && g_haveMenuGlassRect)
+        DrawLiquidGlassBehind(g_menuGlassPos, g_menuGlassSize, 10.0f);
 
     if (g_showFPS)
     {
-        ImGui::SetNextWindowBgAlpha(0.35f);
-        ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.20f);
+        ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
         ImGui::Begin("##fps", nullptr,
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-            ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
             ImGuiWindowFlags_NoNav);
-        ImGui::TextColored(
-            ImVec4(g_fpsColor[0], g_fpsColor[1], g_fpsColor[2], g_fpsColor[3]),
-            "%.0f fps", g_fps);
+        g_fpsGlassPos = ImGui::GetWindowPos();
+        g_fpsGlassSize = ImGui::GetWindowSize();
+        g_haveFpsGlassRect = true;
+        const ImVec4 selectedFpsColor(
+            g_fpsColor[0], g_fpsColor[1], g_fpsColor[2], g_fpsColor[3]);
+        if (g_robloxFpsAvailable)
+            ImGui::TextColored(selectedFpsColor, "%.0f FPS", g_fps);
+        else
+            ImGui::TextColored(selectedFpsColor, "-- FPS");
         ImGui::End();
     }
 
     if (g_menu)
     {
         ImGui::SetNextWindowSize(ImVec2(400, 0), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowBgAlpha(0.95f);
+        ImGui::SetNextWindowBgAlpha(0.22f);
 
         if (ImGui::Begin("Overlay Control", &g_menu,
             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
         {
+            g_menuGlassPos = ImGui::GetWindowPos();
+            g_menuGlassSize = ImGui::GetWindowSize();
+            g_haveMenuGlassRect = true;
             ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.50f, 1.0f), "SYSTEM STATUS");
             ImGui::Separator();
             ImGui::Text("GPU Device: %s", g_gpuName.c_str());
@@ -1010,8 +1303,9 @@ static void Render(const PipePayload& p)
                 SaveSettings();
             ImGui::SameLine(ImGui::GetWindowWidth() - 120);
             ImGui::PushItemWidth(80);
-            ImGui::ColorEdit3("##fpsc", g_fpsColor,
-                ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+            if (ImGui::ColorEdit3("##fpsc", g_fpsColor,
+                ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel))
+                SaveSettings();
             ImGui::PopItemWidth();
 
             ImGui::Spacing();
@@ -1072,7 +1366,17 @@ static RECT TargetRect()
     if (!g_desktop && g_target && IsWindow(g_target))
     {
         GetWindowThreadProcessId(g_target, &g_targetPid);
-        GetWindowRect(g_target, &r);
+        RECT client = {};
+        if (GetClientRect(g_target, &client))
+        {
+            POINT tl = { client.left, client.top };
+            POINT br = { client.right, client.bottom };
+            if (ClientToScreen(g_target, &tl) && ClientToScreen(g_target, &br))
+            {
+                r.left = tl.x; r.top = tl.y;
+                r.right = br.x; r.bottom = br.y;
+            }
+        }
     }
     else if (g_desktop)
         SystemParametersInfoA(SPI_GETWORKAREA, 0, &r, 0);
@@ -1185,6 +1489,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     if (g_menu && ImGui_ImplWin32_WndProcHandler(h, m, w, l))
         return TRUE;
+    if (m == WM_SIZE && w != SIZE_MINIMIZED && g_swap && g_ctx)
+    {
+        const UINT width = LOWORD(l);
+        const UINT height = HIWORD(l);
+        if (width && height) Resize(width, height);
+        return 0;
+    }
+    if (m == WM_ERASEBKGND) return 1;
     if (m == WM_DESTROY) { g_running = false; PostQuitMessage(0); return 0; }
     return DefWindowProcA(h, m, w, l);
 }
@@ -1248,13 +1560,19 @@ static bool InitD3D()
     g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
     g_dev->CreateRenderTargetView(bb, nullptr, &g_rtv);
     bb->Release();
-    CreateLocalDepth(g_width, g_height);
-
     ID3DBlob* b = nullptr;
     if (Compile(VS_SRC, "vs_5_0", &b)) { g_dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_vs); b->Release(); }
     if (Compile(PS_COLOR, "ps_5_0", &b)) { g_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_psColor); b->Release(); }
     if (Compile(PS_DEPTH, "ps_5_0", &b)) { g_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_psDepth); b->Release(); }
     if (Compile(PS_DEPTH_VIEW, "ps_5_0", &b)) { g_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_psDepthView); b->Release(); }
+    if (Compile(PS_GLASS_BLUR, "ps_5_0", &b)) { g_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_psGlassBlur); b->Release(); }
+
+    D3D11_BUFFER_DESC glassCBD = {};
+    glassCBD.ByteWidth = sizeof(GlassCB);
+    glassCBD.Usage = D3D11_USAGE_DYNAMIC;
+    glassCBD.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    glassCBD.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    g_dev->CreateBuffer(&glassCBD, nullptr, &g_glassCB);
 
     D3D11_BUFFER_DESC cbd = {};
     cbd.ByteWidth = sizeof(RemapCB);
@@ -1285,8 +1603,8 @@ static bool InitD3D()
     ImGui::StyleColorsDark();
     {
         ImGuiStyle& st = ImGui::GetStyle();
-        st.WindowRounding = 8.0f;
-        st.FrameRounding = 6.0f;
+        st.WindowRounding = 10.0f;
+        st.FrameRounding = 5.0f;
         st.GrabRounding = 4.0f;
         st.WindowBorderSize = 1.0f;
         st.FrameBorderSize = 0.0f;
@@ -1295,13 +1613,13 @@ static bool InitD3D()
         st.ScrollbarSize = 6.0f;
         st.ScrollbarRounding = 3.0f;
         ImVec4* c = st.Colors;
-        c[ImGuiCol_WindowBg] = ImVec4(0.055f, 0.055f, 0.055f, 0.94f);
-        c[ImGuiCol_ChildBg] = ImVec4(0.065f, 0.065f, 0.065f, 1.0f);
-        c[ImGuiCol_PopupBg] = ImVec4(0.07f, 0.07f, 0.07f, 0.96f);
-        c[ImGuiCol_Border] = ImVec4(0.14f, 0.14f, 0.14f, 0.60f);
-        c[ImGuiCol_FrameBg] = ImVec4(0.08f, 0.08f, 0.08f, 1.0f);
-        c[ImGuiCol_FrameBgHovered] = ImVec4(0.11f, 0.11f, 0.11f, 1.0f);
-        c[ImGuiCol_FrameBgActive] = ImVec4(0.14f, 0.14f, 0.14f, 1.0f);
+        c[ImGuiCol_WindowBg] = ImVec4(0.055f, 0.045f, 0.060f, 0.22f);
+        c[ImGuiCol_ChildBg] = ImVec4(0.070f, 0.055f, 0.075f, 0.40f);
+        c[ImGuiCol_PopupBg] = ImVec4(0.070f, 0.055f, 0.075f, 0.94f);
+        c[ImGuiCol_Border] = ImVec4(0.58f, 0.42f, 0.72f, 0.24f);
+        c[ImGuiCol_FrameBg] = ImVec4(0.10f, 0.08f, 0.11f, 0.48f);
+        c[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.14f, 0.24f, 0.62f);
+        c[ImGuiCol_FrameBgActive] = ImVec4(0.28f, 0.18f, 0.34f, 0.72f);
         c[ImGuiCol_TitleBg] = ImVec4(0.055f, 0.055f, 0.055f, 1.0f);
         c[ImGuiCol_TitleBgActive] = ImVec4(0.07f, 0.07f, 0.07f, 1.0f);
         c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.055f, 0.055f, 0.055f, 0.75f);
@@ -1310,16 +1628,16 @@ static bool InitD3D()
         c[ImGuiCol_ScrollbarGrab] = ImVec4(0.20f, 0.20f, 0.20f, 1.0f);
         c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.28f, 0.28f, 0.28f, 1.0f);
         c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.35f, 0.35f, 0.35f, 1.0f);
-        c[ImGuiCol_CheckMark] = ImVec4(0.83f, 0.83f, 0.83f, 1.0f);
-        c[ImGuiCol_SliderGrab] = ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
-        c[ImGuiCol_SliderGrabActive] = ImVec4(0.75f, 0.75f, 0.75f, 1.0f);
-        c[ImGuiCol_Button] = ImVec4(0.10f, 0.10f, 0.10f, 1.0f);
-        c[ImGuiCol_ButtonHovered] = ImVec4(0.15f, 0.15f, 0.15f, 1.0f);
-        c[ImGuiCol_ButtonActive] = ImVec4(0.20f, 0.20f, 0.20f, 1.0f);
+        c[ImGuiCol_CheckMark] = ImVec4(0.75f, 0.47f, 1.00f, 1.0f);
+        c[ImGuiCol_SliderGrab] = ImVec4(0.66f, 0.40f, 0.90f, 1.0f);
+        c[ImGuiCol_SliderGrabActive] = ImVec4(0.79f, 0.55f, 1.00f, 1.0f);
+        c[ImGuiCol_Button] = ImVec4(0.12f, 0.09f, 0.13f, 0.54f);
+        c[ImGuiCol_ButtonHovered] = ImVec4(0.24f, 0.15f, 0.29f, 0.70f);
+        c[ImGuiCol_ButtonActive] = ImVec4(0.34f, 0.20f, 0.42f, 0.82f);
         c[ImGuiCol_Header] = ImVec4(0.10f, 0.10f, 0.10f, 1.0f);
         c[ImGuiCol_HeaderHovered] = ImVec4(0.14f, 0.14f, 0.14f, 1.0f);
         c[ImGuiCol_HeaderActive] = ImVec4(0.18f, 0.18f, 0.18f, 1.0f);
-        c[ImGuiCol_Separator] = ImVec4(0.14f, 0.14f, 0.14f, 0.50f);
+        c[ImGuiCol_Separator] = ImVec4(0.48f, 0.35f, 0.56f, 0.28f);
         c[ImGuiCol_SeparatorHovered] = ImVec4(0.30f, 0.30f, 0.30f, 0.50f);
         c[ImGuiCol_SeparatorActive] = ImVec4(0.40f, 0.40f, 0.40f, 0.50f);
         c[ImGuiCol_ResizeGrip] = ImVec4(0.20f, 0.20f, 0.20f, 0.20f);
@@ -1339,7 +1657,7 @@ static void Follow()
     UpdateForegroundVisibility();
     if (!g_overlayEnabled || g_overlayHiddenForForeground || g_resyncing) return;
     DWORD now = GetTickCount();
-    if (now - g_lastFollow < 50) return;
+    if (now - g_lastFollow < 16) return;
     g_lastFollow = now;
     if (!g_target || !IsWindow(g_target)) { g_target = FindTarget(); return; }
     RECT r = TargetRect();
@@ -1376,6 +1694,8 @@ static void ProcessOverlayResync()
     int nw = std::max<int>(1, (int)(r.right - r.left));
     int nh = std::max<int>(1, (int)(r.bottom - r.top));
     SetWindowPos(g_hwnd, HWND_TOPMOST, r.left, r.top, nw, nh, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    Resize((UINT)nw, (UINT)nh);
+    g_lastRect = r;
 
     SafeRelease(g_colorSRV); SafeRelease(g_colorTex);
     SafeRelease(g_depthSRV); SafeRelease(g_depthTex);
@@ -1443,12 +1763,22 @@ static void Hotkeys()
 
     if (f11 && !pF11)
     {
+        HWND foregroundBefore = GetForegroundWindow();
+        DWORD foregroundPid = 0;
+        if (foregroundBefore)
+            GetWindowThreadProcessId(foregroundBefore, &foregroundPid);
+        const bool physicalKeyReachedTarget =
+            (foregroundBefore == g_target) ||
+            (g_targetPid != 0 && foregroundPid == g_targetPid);
+
         g_menu = false;
         g_reshadeInput = false;
         ApplyWindowMode();
-        SendKeyToRoblox(VK_F11, true);
+        if (!physicalKeyReachedTarget)
+            SendKeyToRoblox(VK_F11, true);
+
         g_overlayEnabled = true;
-        RequestOverlayResync("F11 fullscreen transition", 1600);
+        RequestOverlayResync("F11 fullscreen transition", 250);
     }
 
  
@@ -1470,6 +1800,13 @@ static void Hotkeys()
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
 {
+    using SetDpiAwarenessContextFn = BOOL(WINAPI*)(HANDLE);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    auto setDpiContext = user32 ? reinterpret_cast<SetDpiAwarenessContextFn>(
+        GetProcAddress(user32, "SetProcessDpiAwarenessContext")) : nullptr;
+    if (!setDpiContext || !setDpiContext((HANDLE)-4))
+        SetProcessDPIAware();
+
     g_console = HasArg("/console");
     g_desktop = HasArg("/desktop");
     g_menu = HasArg("/menu");
@@ -1522,7 +1859,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         {
             PipePayload fp;
             { std::lock_guard<std::mutex> lk(g_pipeMutex); fp = g_payload; }
-            UpdateFPS(fp.frameCount);
+            UpdateRobloxFPS();
             Render(fp);
         }
         else
@@ -1545,6 +1882,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     SafeRelease(g_localDSV);  SafeRelease(g_localDepth);
     SafeRelease(g_dsWrite);   SafeRelease(g_dsOff);
     SafeRelease(g_sampLinear); SafeRelease(g_sampPoint);
+    ReleaseGlassTextures();
+    SafeRelease(g_glassCB);   SafeRelease(g_psGlassBlur);
     SafeRelease(g_cb);
     SafeRelease(g_vs);
     SafeRelease(g_psColor);   SafeRelease(g_psDepth);  SafeRelease(g_psDepthView);
