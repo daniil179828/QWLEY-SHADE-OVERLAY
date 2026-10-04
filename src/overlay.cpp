@@ -49,8 +49,8 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 #define PAYLOAD_SIZE    0x40u
 
 extern "C" {
-__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
-__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+    __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+    __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 
 #pragma pack(push, 1)
@@ -180,6 +180,7 @@ static bool   g_vsync = true;
 static UINT   g_maxOverlayFps = 60;
 static bool   g_overlayFpsExplicit = false;
 static bool   g_uiLayoutReset = true;
+static bool   g_showKeyHelp = true;
 static bool   g_highResolutionTimer = false;
 enum class PerfTier { Auto, Low, Balanced, High };
 static PerfTier g_requestedPerfTier = PerfTier::Auto;
@@ -367,7 +368,7 @@ static const char* const kDefaultTargetExes[] = {
     "voistrap.bin.exe"
 };
 static const size_t kDefaultTargetExeCount =
-    sizeof(kDefaultTargetExes) / sizeof(kDefaultTargetExes[0]);
+sizeof(kDefaultTargetExes) / sizeof(kDefaultTargetExes[0]);
 
 static std::vector<std::string> g_targetExes;
 static std::string g_targetExeDisplay = "";
@@ -560,53 +561,59 @@ static void ApplyPerfProfile()
     PerfTier tier = g_requestedPerfTier;
     if (tier == PerfTier::Auto)
     {
-        if (g_gpuSoftware || g_gpuDedicatedMB < 1536)
+        if (g_gpuSoftware || g_gpuDedicatedMB < 2048)
             tier = PerfTier::Low;
-        else if (g_gpuDedicatedMB < 4096)
+        else if (g_gpuDedicatedMB < 5120)
             tier = PerfTier::Balanced;
         else
             tier = PerfTier::High;
     }
     g_displayRefreshHz = QueryDisplayRefreshHz();
+    // Keep heuristic draws intact so ReShade depth buffer detector never loses the buffer!
+    g_depthHeuristicDraws = 12;
+    g_fastDepthFinal = false;
+
     switch (tier)
     {
     case PerfTier::Low:
-        g_activePerfProfile = "Low / stable";
-        g_menuActiveFps = 60;
-        g_menuIdleFps = 15;
-        g_counterUiFps = 15;
-        g_statsSampleIntervalMs = 250;
-        g_vramQueryIntervalMs = 2500;
+        g_activePerfProfile = (g_requestedPerfTier == PerfTier::Auto) ? "Auto (Low / Stable)" : "Low / Stable";
+        g_menuActiveFps = 45;
+        g_menuIdleFps = 10;
+        g_counterUiFps = 10;
+        g_statsSampleIntervalMs = 350;
+        g_vramQueryIntervalMs = 3000;
+        if (!g_overlayFpsExplicit)
+            g_maxOverlayFps = std::clamp<UINT>(g_displayRefreshHz, 30u, 60u);
         break;
     case PerfTier::Balanced:
-        g_activePerfProfile = "Balanced";
-        g_menuActiveFps = std::min<UINT>(90, std::max<UINT>(60, g_displayRefreshHz));
-        g_menuIdleFps = 20;
-        g_counterUiFps = 30;
-        g_statsSampleIntervalMs = 150;
+        g_activePerfProfile = (g_requestedPerfTier == PerfTier::Auto) ? "Auto (Balanced)" : "Balanced";
+        g_menuActiveFps = std::min<UINT>(60, std::max<UINT>(45, g_displayRefreshHz));
+        g_menuIdleFps = 15;
+        g_counterUiFps = 20;
+        g_statsSampleIntervalMs = 200;
         g_vramQueryIntervalMs = 1500;
+        if (!g_overlayFpsExplicit)
+            g_maxOverlayFps = std::clamp<UINT>(g_displayRefreshHz, 30u, 120u);
         break;
     case PerfTier::High:
-        g_activePerfProfile = "High / smooth";
+        g_activePerfProfile = (g_requestedPerfTier == PerfTier::Auto) ? "Auto (High / Smooth)" : "High / Smooth";
         g_menuActiveFps = std::min<UINT>(120, std::max<UINT>(60, g_displayRefreshHz));
         g_menuIdleFps = 30;
         g_counterUiFps = 60;
         g_statsSampleIntervalMs = 100;
         g_vramQueryIntervalMs = 750;
+        if (!g_overlayFpsExplicit)
+            g_maxOverlayFps = std::clamp<UINT>(g_displayRefreshHz, 30u, 240u);
         break;
     default:
         g_activePerfProfile = "Auto";
         break;
     }
 
-    if (!g_overlayFpsExplicit)
-        g_maxOverlayFps = std::clamp<UINT>(g_displayRefreshHz, 30u, 240u);
-
     g_overlayFrameCostMs = 0.0;
-    Log("[Performance] fixed scene=%u FPS, profile=%s, menu=%u/%u FPS, counter=%u FPS, stats=%lu ms, VRAM=%zu MB, vsync=%d",
-        g_maxOverlayFps, g_activePerfProfile, g_menuActiveFps, g_menuIdleFps,
-        g_counterUiFps, (unsigned long)g_statsSampleIntervalMs,
-        g_gpuDedicatedMB, (int)g_vsync);
+    Log("[Performance] profile=%s (tier=%d, requested=%d), overlayMaxFps=%u, depthHeuristic=%d, fastDepth=%d, VRAM=%zu MB",
+        g_activePerfProfile, (int)tier, (int)g_requestedPerfTier,
+        g_maxOverlayFps, g_depthHeuristicDraws, (int)g_fastDepthFinal, g_gpuDedicatedMB);
 }
 
 static void QueryGpuNameFromDevice()
@@ -989,6 +996,7 @@ static void LoadSettings()
     std::vector<IniSection> ini = IniLoad(g_iniPath);
     if (ini.empty()) return;
     g_uiLayoutReset = atoi(IniGet(ini, "UI", "LayoutVersion", "0")) < 4;
+    g_showKeyHelp = atoi(IniGet(ini, "UI", "HasOpenedMenu", "0")) == 0;
 
     int v = atoi(IniGet(ini, "Keybinds", "Minimize", "0"));
     if (v > 0 && v < 256) g_minimizeKey = v;
@@ -1032,7 +1040,7 @@ static void LoadSettings()
         const char* prof = IniGet(ini, "Performance", "Profile", "");
         if (_stricmp(prof, "low") == 0)                             g_requestedPerfTier = PerfTier::Low;
         else if (_stricmp(prof, "balanced") == 0 ||
-                 _stricmp(prof, "medium") == 0)                     g_requestedPerfTier = PerfTier::Balanced;
+            _stricmp(prof, "medium") == 0)                     g_requestedPerfTier = PerfTier::Balanced;
         else if (_stricmp(prof, "high") == 0)                       g_requestedPerfTier = PerfTier::High;
         else if (_stricmp(prof, "auto") == 0)                       g_requestedPerfTier = PerfTier::Auto;
     }
@@ -1045,6 +1053,7 @@ static void SaveSettings()
     IniSet(ini, "Keybinds", "Minimize", std::to_string(g_minimizeKey));
     IniSet(ini, "Keybinds", "Menu", MenuBindingText());
     IniSet(ini, "UI", "LayoutVersion", g_uiLayoutReset ? "0" : "4");
+    IniSet(ini, "UI", "HasOpenedMenu", g_showKeyHelp ? "0" : "1");
     IniSet(ini, "Performance", "Profile", PerfTierName(g_requestedPerfTier));
     IniSet(ini, "Performance", "OverlayLimit", "0");
     IniSet(ini, "Style", "ShowFPS", g_showFPS ? "1" : "0");
@@ -1582,6 +1591,11 @@ static void SetCombinedRemap(const PipePayload& p)
         cb.depthUV[1] = -cb.depthUV[1];
     }
 
+    cb.misc[0] = g_depthReversed ? 0.0f : 1.0f;
+    cb.misc[1] = g_depthFarPlane;
+    cb.misc[2] = 0.0f;
+    cb.misc[3] = 0.0f;
+
     static CombinedRemapCB last = {};
     static bool valid = false;
     if (!valid || memcmp(&last, &cb, sizeof(cb)) != 0)
@@ -1841,12 +1855,6 @@ static void RenderDepthFinalPass(const PipePayload& p)
     g_ctx->PSSetSamplers(0, 1, &g_sampPoint);
     ViewportFull();
 
-    if (g_fastDepthFinal)
-    {
-        D3D11_VIEWPORT tiny = {};
-        tiny.Width = tiny.Height = 1.0f; tiny.MaxDepth = 1.0f;
-        g_ctx->RSSetViewports(1, &tiny);
-    }
     DrawTri();
     DrawTri();
     ViewportFull();
@@ -2073,6 +2081,11 @@ static void SetMenu(bool v)
 {
 
     if (v && !g_overlayEnabled) return;
+    if (v && g_showKeyHelp)
+    {
+        g_showKeyHelp = false;
+        SaveSettings();
+    }
     g_menu = v;
     if (v) g_reshadeInput = false;
     if (!v) HideMenuLayer();
@@ -2642,7 +2655,7 @@ static bool ComputeUiRegion(float minX, float minY, float maxX, float maxY,
 
 static void RenderUiLayer(const PipePayload& p)
 {
-    const bool drawUi = g_menu;
+    const bool drawUi = g_menu || g_showKeyHelp;
 
     if (!g_uiHwnd || !g_overlayEnabled || g_overlayHiddenForForeground ||
         g_reshadeInput || g_resyncing || !drawUi)
@@ -2652,10 +2665,12 @@ static void RenderUiLayer(const PipePayload& p)
     }
 
     static bool lastMenu = false;
+    static bool lastShowKeyHelp = false;
     static bool lastShowFPS = false;
     static UINT lastWidth = 0, lastHeight = 0;
-    const bool uiModeChanged = lastMenu != g_menu || lastShowFPS != g_showFPS ||
-        lastWidth != g_width || lastHeight != g_height;
+    const bool uiModeChanged = lastMenu != g_menu || lastShowKeyHelp != g_showKeyHelp ||
+        lastShowFPS != g_showFPS || lastWidth != g_width || lastHeight != g_height;
+    lastShowKeyHelp = g_showKeyHelp;
     if (uiModeChanged)
         for (auto& slot : g_uiReadbacks) slot.pending = false;
     lastMenu = g_menu; lastShowFPS = g_showFPS;
@@ -2701,6 +2716,8 @@ static void RenderUiLayer(const PipePayload& p)
                         ImGuiColorEditFlags_NoInputs);
                     if (ImGui::IsItemDeactivatedAfterEdit()) SaveSettings();
 
+                    ImGui::Checkbox("Depth preview (F3)", &g_depthPreview);
+
                     UiSection("CONTROL");
                     char overlayKeyLabel[128];
                     if (g_waitKeyTarget == 1)
@@ -2733,6 +2750,39 @@ static void RenderUiLayer(const PipePayload& p)
         if (g_uiLayoutReset) { g_uiLayoutReset = false; SaveSettings(); }
         if (!g_menu && !g_reshadeInput) SetMenu(false);
 
+    }
+
+    if (g_showKeyHelp && !g_menu)
+    {
+        ImGui::SetNextWindowPos(
+            ImVec2((float)g_width * 0.5f, (float)g_height * 0.5f),
+            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(295.0f, 0.0f), ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 4.0f));
+        ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0.24f, 0.25f, 0.26f, 0.98f));
+        ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0.24f, 0.25f, 0.26f, 0.98f));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.08f, 0.96f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.18f, 0.18f, 0.18f, 0.90f));
+
+        if (ImGui::Begin("Keybind Help", nullptr,
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNav |
+            ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            std::string bindText = MenuBindingText();
+            ImGui::TextColored(ImVec4(0.92f, 0.90f, 0.35f, 1.0f),
+                "Press %s to open settings", bindText.c_str());
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.78f, 0.78f, 0.78f, 1.0f));
+            ImGui::TextWrapped(
+                "This popup will disappear after you open the settings menu for the first time.");
+            ImGui::PopStyleColor();
+        }
+        ImGui::End();
+
+        ImGui::PopStyleColor(4);
+        ImGui::PopStyleVar(2);
     }
 
     ImGui::Render();
@@ -2770,7 +2820,9 @@ static void RenderUiLayer(const PipePayload& p)
 
     UiRegionBounds region = {};
     if (!ComputeUiRegion(minX, minY, maxX, maxY, g_width, g_height, region))
-    { HideMenuLayer(); return; }
+    {
+        HideMenuLayer(); return;
+    }
     int rx = region.x, ry = region.y, rw = region.w, rh = region.h;
     if (!EnsureUiLayerSize((UINT)rw, (UINT)rh) ||
         !EnsureUiRegion((UINT)rw, (UINT)rh) || !EnsureUiBitmap((UINT)rw, (UINT)rh)) return;
@@ -2988,8 +3040,7 @@ static void AutoColorDepthTick()
     if (!g_overlayEnabled) { g_autoArmed = false; return; }
 
     if (!g_autoDepthRebuildEnabled) return;
-    if (g_framesPresented < 300 || !g_firstPresentTick) return;
-    if (GetTickCount() - g_firstPresentTick < 10000) return;
+    if (g_framesPresented < 30 || !g_firstPresentTick) return;
 
     const DWORD now = GetTickCount();
     const bool pipeLive = g_pipeConnected.load(std::memory_order_acquire) &&
@@ -3028,12 +3079,10 @@ static void AutoColorDepthTick()
     if (now - g_autoWatchStartTick < kAutoGraceMs)
         return;
 
-    static const DWORD kAutoRetryGapMs[] = { 1200, 2500, 5000, 10000, 20000 };
+    static const DWORD kAutoRetryGapMs[] = { 800, 1500, 2500, 4000 };
     const int gapCount = (int)(sizeof(kAutoRetryGapMs) / sizeof(kAutoRetryGapMs[0]));
     const DWORD retryGap = kAutoRetryGapMs[std::min(g_autoAttemptCount, gapCount - 1)];
     if (g_autoLastAttemptTick && now - g_autoLastAttemptTick < retryGap)
-        return;
-    if (g_autoAttemptCount >= kAutoMaxAttempts)
         return;
 
     Log("[AutoColorDepth] status incomplete (C=%d D=%d), rebuilding depth (attempt %d/%d)",
@@ -3254,10 +3303,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     {
         std::unique_lock<std::mutex> lk(g_pipeMutex);
         g_pipeCv.wait_for(lk, std::chrono::seconds(15), []
-        {
-            return g_pipeEverConnected.load(std::memory_order_acquire) ||
-                g_pipeStop.load(std::memory_order_acquire);
-        });
+            {
+                return g_pipeEverConnected.load(std::memory_order_acquire) ||
+                    g_pipeStop.load(std::memory_order_acquire);
+            });
         pipeWasSeen = g_pipeEverConnected.load(std::memory_order_acquire);
     }
     if (!pipeWasSeen && !g_pipeStop.load(std::memory_order_acquire))
@@ -3294,7 +3343,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             const auto interval = std::chrono::nanoseconds(
                 1000000000ll / (long long)std::max<UINT>(30, g_maxOverlayFps));
             const bool menuUi = g_menu || g_reshadeInput;
-            const bool wantsUi = menuUi || g_showFPS;
+            const bool wantsUi = menuUi || g_showKeyHelp || g_showFPS;
 
             static POINT lastCursor = {};
             static DWORD lastInteractionTick = 0;
@@ -3317,10 +3366,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             const auto uiInterval = std::chrono::nanoseconds(
                 1000000000ll / (long long)std::max<UINT>(1, uiFps));
             static bool scheduledMenu = false;
+            static bool scheduledShowKeyHelp = false;
             static bool scheduledShowFPS = false;
             const bool frameDue = now >= nextFrameTime;
             const bool uiNeedsFrame = wantsUi && now >= nextUiTime;
             const bool uiModeChanged = scheduledMenu != g_menu ||
+                scheduledShowKeyHelp != g_showKeyHelp ||
                 scheduledShowFPS != g_showFPS;
             const bool sourceChanged = packet != lastRenderedPacket;
 
@@ -3337,7 +3388,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
 
                 if (uiNeedsFrame || uiModeChanged)
                 {
-                    if (g_menu) RenderUiLayer(fp);
+                    if (g_menu || g_showKeyHelp) RenderUiLayer(fp);
                     else HideMenuLayer();
 
                     if (g_showFPS) RenderFpsLayer();
@@ -3366,6 +3417,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
                 if (uiNeedsFrame || uiModeChanged)
                     nextUiTime = AdvanceFrameDeadline(nextUiTime, uiInterval, done);
                 scheduledMenu = g_menu;
+                scheduledShowKeyHelp = g_showKeyHelp;
                 scheduledShowFPS = g_showFPS;
             }
             else
@@ -3382,11 +3434,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
                 std::unique_lock<std::mutex> lk(g_pipeMutex);
 
                 g_pipeCv.wait_until(lk, wakeAt, [packet, frameDue]()
-                {
-                    return (frameDue &&
-                        g_sourcePacketSerial.load(std::memory_order_acquire) != packet) ||
-                        g_pipeStop.load(std::memory_order_acquire);
-                });
+                    {
+                        return (frameDue &&
+                            g_sourcePacketSerial.load(std::memory_order_acquire) != packet) ||
+                            g_pipeStop.load(std::memory_order_acquire);
+                    });
             }
         }
         else
